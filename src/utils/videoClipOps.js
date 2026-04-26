@@ -5,8 +5,24 @@ function safeNumber(value, fallback = 0) {
   return Number.isFinite(num) ? num : fallback;
 }
 
+function clipSourceRangeMs(clip) {
+  const start = Math.max(0, safeNumber(clip?.sourceStartMs));
+  const rawEnd = Number(clip?.sourceEndMs);
+  if (Number.isFinite(rawEnd) && rawEnd > start) {
+    return { startMs: start, endMs: rawEnd };
+  }
+
+  const rawDuration = Number(clip?.sourceDurationMs);
+  if (Number.isFinite(rawDuration) && rawDuration > start) {
+    return { startMs: start, endMs: rawDuration };
+  }
+
+  return { startMs: start, endMs: start };
+}
+
 export function clipDurationMs(clip) {
-  return Math.max(0, safeNumber(clip?.sourceEndMs) - safeNumber(clip?.sourceStartMs));
+  const range = clipSourceRangeMs(clip);
+  return Math.max(0, range.endMs - range.startMs);
 }
 
 export function clipTimelineEndMs(clip) {
@@ -130,6 +146,17 @@ export function findVideoClipAtTime(clips, timeMs, options = {}) {
     return matches[matches.length - 1];
   }
 
+  let bestByStart = null;
+  for (const clip of ordered) {
+    const start = safeNumber(clip.timelineStartMs);
+    if (start <= t && (!bestByStart || start >= safeNumber(bestByStart.timelineStartMs))) {
+      bestByStart = clip;
+    }
+  }
+  if (bestByStart) {
+    return bestByStart;
+  }
+
   const last = ordered[ordered.length - 1];
   if (t >= clipTimelineEndMs(last)) {
     return last;
@@ -169,8 +196,9 @@ export function trimVideoClip(clips, clipId, nextWindow, minDurationMs = 120) {
 
     const oldStart = safeNumber(clip.timelineStartMs);
     const oldEnd = clipTimelineEndMs(clip);
-    const oldSrcStart = safeNumber(clip.sourceStartMs);
-    const oldSrcEnd = safeNumber(clip.sourceEndMs);
+    const sourceRange = clipSourceRangeMs(clip);
+    const oldSrcStart = sourceRange.startMs;
+    const oldSrcEnd = sourceRange.endMs;
     const sourceDuration = Math.max(oldSrcEnd, safeNumber(clip.sourceDurationMs));
 
     let newStart = Number.isFinite(Number(nextWindow?.startMs)) ? Number(nextWindow.startMs) : oldStart;

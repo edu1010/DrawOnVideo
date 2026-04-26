@@ -113,6 +113,25 @@ function volumeFromDb(db) {
   return Math.min(1, Math.max(0, linear));
 }
 
+function clipLocalRangeMs(clip, videoDurationMs = 0) {
+  const startMs = Math.max(0, Number(clip?.sourceStartMs) || 0);
+  const explicitEnd = Number(clip?.sourceEndMs);
+  if (Number.isFinite(explicitEnd) && explicitEnd > startMs) {
+    return { startMs, endMs: explicitEnd };
+  }
+
+  const sourceDuration = Number(clip?.sourceDurationMs);
+  if (Number.isFinite(sourceDuration) && sourceDuration > startMs) {
+    return { startMs, endMs: sourceDuration };
+  }
+
+  if (Number.isFinite(videoDurationMs) && videoDurationMs > 0) {
+    return { startMs, endMs: startMs + videoDurationMs };
+  }
+
+  return { startMs, endMs: startMs + 1000 };
+}
+
 function App() {
   const initialLayer = useMemo(() => createLayer("Layer 1"), []);
   const initialVideoLayer = useMemo(() => createVideoLayer("Video 1"), []);
@@ -241,7 +260,9 @@ function App() {
     const { autoplay = false } = options;
     const ordered = sortVideoClips(videoClipsRef.current);
     const totalMs = totalTimelineDurationMs(ordered);
-    const safeTargetMs = clamp(Number(targetMs) || 0, 0, totalMs);
+    const metaDurationMs = Math.max(0, (Number(videoMetaRef.current.duration) || 0) * 1000);
+    const effectiveTotalMs = Math.max(totalMs, metaDurationMs);
+    const safeTargetMs = clamp(Number(targetMs) || 0, 0, effectiveTotalMs);
     const clip = findVideoClipAtTime(ordered, safeTargetMs, {
       preferredLayerId: activeVideoLayerIdRef.current,
       layerOrderIds: (videoLayersRef.current || []).map((layer) => layer.id)
@@ -254,16 +275,15 @@ function App() {
       return;
     }
 
-    const localMs = Math.max(
-      Number(clip.sourceStartMs) || 0,
-      Math.min(
-        Number(clip.sourceEndMs) || Number.POSITIVE_INFINITY,
-        (Number(clip.sourceStartMs) || 0) + (safeTargetMs - (Number(clip.timelineStartMs) || 0))
-      )
-    );
+    const safeGlobalMs = clamp(Number(targetMs) || 0, 0, effectiveTotalMs);
+    const timelineStartMs = Number(clip.timelineStartMs) || 0;
+    const loadedVideoDurationMs = Number.isFinite(Number(video.duration)) ? Number(video.duration) * 1000 : 0;
+    const localRange = clipLocalRangeMs(clip, loadedVideoDurationMs);
+    const unclampedLocalMs = localRange.startMs + (safeGlobalMs - timelineStartMs);
+    const localMs = clamp(unclampedLocalMs, localRange.startMs, localRange.endMs);
 
-    currentTimeRef.current = safeTargetMs / 1000;
-    setCurrentTime(safeTargetMs / 1000);
+    currentTimeRef.current = safeGlobalMs / 1000;
+    setCurrentTime(safeGlobalMs / 1000);
     dirtyRef.current = true;
 
     const needsSourceSwap = videoUrl !== clip.url;
@@ -822,7 +842,8 @@ function App() {
       return;
     }
 
-    const duration = Number(videoMetaRef.current.duration) || 0;
+    const timelineDuration = totalTimelineDurationMs(videoClipsRef.current) / 1000;
+    const duration = Math.max(Number(videoMetaRef.current.duration) || 0, timelineDuration);
     const safeTime = clamp(nextTime, 0, duration);
     seekGlobalTimeMs(safeTime * 1000, { autoplay: false });
   }, [seekGlobalTimeMs]);
@@ -834,12 +855,20 @@ function App() {
         return;
       }
 
-      const frameDuration = 1 / Math.max(videoMetaRef.current.fps || 30, 1);
+      const safeDirection = Number(direction) >= 0 ? 1 : -1;
+      const safeFps = Math.max(Number(videoMetaRef.current.fps) || 30, 1);
+      const baseTime = Number.isFinite(currentTimeRef.current)
+        ? currentTimeRef.current
+        : (Number(currentTime) || 0);
+      const baseFrame = Math.max(0, Math.round(baseTime * safeFps));
+      const nextFrame = Math.max(0, baseFrame + safeDirection);
+      const nextTime = nextFrame / safeFps;
+
       video.pause();
       setIsPlaying(false);
-      handleSeek(currentTimeRef.current + direction * frameDuration);
+      seekGlobalTimeMs(nextTime * 1000, { autoplay: false });
     },
-    [handleSeek]
+    [currentTime, seekGlobalTimeMs]
   );
 
   const activeLayer = layers.find((layer) => layer.id === activeLayerId);
@@ -1441,7 +1470,10 @@ function App() {
                   onLoadedMetadata={(event) => {
                     const video = event.currentTarget;
                     const pendingSeek = pendingVideoSeekRef.current;
-                    if (pendingSeek && pendingSeek.clipId === currentVideoClipIdRef.current) {
+                    if (pendingSeek) {
+                      if (pendingSeek.clipId && pendingSeek.clipId !== currentVideoClipIdRef.current) {
+                        setCurrentVideoClipId(pendingSeek.clipId);
+                      }
                       video.currentTime = (Number(pendingSeek.localMs) || 0) / 1000;
                       if (pendingSeek.autoplay) {
                         video.play().catch(() => {});
@@ -1449,11 +1481,70 @@ function App() {
                       pendingVideoSeekRef.current = null;
                     }
 
+                    const loadedDurationSeconds = Number(video.duration);
+                    const loadedDurationMs = Number.isFinite(loadedDurationSeconds) && loadedDurationSeconds > 0
+                      ? loadedDurationSeconds * 1000
+                      : null;
+                    const loadedWidth = Number(video.videoWidth) || 0;
+                    const loadedHeight = Number(video.videoHeight) || 0;
+                    let activeClipId = currentVideoClipIdRef.current;
+                    if (!activeClipId) {
+                      const fallbackClip = (videoClipsRef.current || []).find(
+                        (clip) => clip.url && clip.url === videoUrl
+                      );
+                      activeClipId = fallbackClip?.id || null;
+                    }
+
+                    if (activeClipId && loadedDurationMs) {
+                      setVideoClips((prev) => {
+                        let changed = false;
+                        const next = (prev || []).map((clip) => {
+                          if (clip.id !== activeClipId) {
+                            return clip;
+                          }
+
+                          const currentStart = Number(clip.sourceStartMs) || 0;
+                          const currentEnd = Number(clip.sourceEndMs);
+                          const hasValidRange = Number.isFinite(currentEnd) && currentEnd > currentStart;
+                          const currentDuration = Number(clip.sourceDurationMs) || 0;
+
+                          const patch = {};
+                          if (Math.abs(currentDuration - loadedDurationMs) > 1) {
+                            patch.sourceDurationMs = loadedDurationMs;
+                          }
+                          if (!hasValidRange) {
+                            patch.sourceStartMs = currentStart;
+                            patch.sourceEndMs = currentStart + loadedDurationMs;
+                          } else if (currentEnd > loadedDurationMs && currentStart <= 0) {
+                            patch.sourceEndMs = loadedDurationMs;
+                          }
+                          if (loadedWidth > 0 && loadedWidth !== Number(clip.width)) {
+                            patch.width = loadedWidth;
+                          }
+                          if (loadedHeight > 0 && loadedHeight !== Number(clip.height)) {
+                            patch.height = loadedHeight;
+                          }
+
+                          if (Object.keys(patch).length === 0) {
+                            return clip;
+                          }
+
+                          changed = true;
+                          return { ...clip, ...patch };
+                        });
+
+                        return changed ? next : prev;
+                      });
+                    }
+
+                    const clipTimelineDurationSeconds = totalTimelineDurationMs(videoClipsRef.current) / 1000;
                     const nextMeta = {
-                      width: Number(video.videoWidth) || videoMetaRef.current.width,
-                      height: Number(video.videoHeight) || videoMetaRef.current.height,
+                      width: loadedWidth || videoMetaRef.current.width,
+                      height: loadedHeight || videoMetaRef.current.height,
                       fps: Number(videoMetaRef.current.fps) || DEFAULT_VIDEO_META.fps,
-                      duration: Number(videoMetaRef.current.duration) || DEFAULT_VIDEO_META.duration
+                      duration: clipTimelineDurationSeconds > 0
+                        ? clipTimelineDurationSeconds
+                        : (loadedDurationMs ? loadedDurationMs / 1000 : (Number(videoMetaRef.current.duration) || DEFAULT_VIDEO_META.duration))
                     };
                     setVideoMeta(nextMeta);
                     videoMetaRef.current = nextMeta;

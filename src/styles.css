@@ -458,6 +458,10 @@ button.danger {
   background: rgba(13, 24, 37, 0.75);
 }
 
+.timeline-track-with-thumbs {
+  overflow: hidden;
+}
+
 .timeline-video-track {
   background: rgba(15, 22, 30, 0.9);
 }
@@ -467,22 +471,20 @@ button.danger {
   box-shadow: inset 0 0 0 1px rgba(113, 179, 242, 0.24);
 }
 
-.timeline-thumb-track {
-  background: rgba(9, 19, 29, 0.95);
-}
-
-.timeline-thumb-item {
+.timeline-track-thumb-item {
   position: absolute;
   inset: 4px auto 4px 0;
   overflow: hidden;
   border-right: 1px solid rgba(71, 103, 137, 0.45);
+  pointer-events: none;
+  z-index: 0;
 }
 
-.timeline-thumb-item img {
+.timeline-track-thumb-item img {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  opacity: 0.8;
+  opacity: 0.58;
   filter: saturate(0.86) contrast(1.03);
 }
 
@@ -497,6 +499,11 @@ button.danger {
   border: 1px solid rgba(76, 108, 141, 0.6);
   border-radius: 7px;
   padding: 5px 8px;
+}
+
+.timeline-thumb-floating {
+  top: 34px;
+  z-index: 5;
 }
 
 .timeline-clip {
@@ -514,6 +521,7 @@ button.danger {
   cursor: move;
   user-select: none;
   overflow: hidden;
+  z-index: 2;
 }
 
 .timeline-clip.selected {

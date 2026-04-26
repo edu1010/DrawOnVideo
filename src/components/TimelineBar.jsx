@@ -364,6 +364,25 @@ function TimelineBar({
     return trackElement.getAttribute("data-layer-id");
   }
 
+  function renderTrackThumbnails(trackKey) {
+    return thumbnails.map((item, index) => {
+      const next = thumbnails[index + 1];
+      const startX = item.time * pixelsPerSecond;
+      const endX = (next ? next.time : durationSafe) * pixelsPerSecond;
+      const width = Math.max(28, endX - startX);
+
+      return (
+        <div
+          className="timeline-track-thumb-item"
+          key={`${trackKey}-thumb-${index}-${item.time}`}
+          style={{ left: `${startX}px`, width: `${width}px` }}
+        >
+          <img src={item.dataUrl} alt="" aria-hidden />
+        </div>
+      );
+    });
+  }
+
   useEffect(() => {
     const onMove = (event) => {
       const drag = dragRef.current;
@@ -617,7 +636,7 @@ function TimelineBar({
 
       <div className="timeline-editor-grid">
         <div className="timeline-label-column">
-          <div className="timeline-label timeline-label-header">Preview</div>
+          <div className="timeline-label timeline-label-header">Layers</div>
           {videoLayerRows.map((videoLayer) => (
             <button
               type="button"
@@ -660,35 +679,17 @@ function TimelineBar({
               ))}
             </div>
 
-            <div className="timeline-track timeline-thumb-track" style={{ height: `${trackHeight}px` }}>
-              {thumbnails.map((item, index) => {
-                const next = thumbnails[index + 1];
-                const startX = item.time * pixelsPerSecond;
-                const endX = (next ? next.time : durationSafe) * pixelsPerSecond;
-                const width = Math.max(28, endX - startX);
-
-                return (
-                  <div
-                    className="timeline-thumb-item"
-                    key={`thumb-${index}-${item.time}`}
-                    style={{ left: `${startX}px`, width: `${width}px` }}
-                  >
-                    <img src={item.dataUrl} alt={`Thumbnail ${index + 1}`} />
-                  </div>
-                );
-              })}
-
-              {thumbState === "loading" ? <div className="thumb-status">Generating preview thumbnails...</div> : null}
-              {thumbState === "error" ? <div className="thumb-status">Could not generate thumbnails for this file.</div> : null}
-            </div>
+            {thumbState === "loading" ? <div className="thumb-status timeline-thumb-floating">Generating preview thumbnails...</div> : null}
+            {thumbState === "error" ? <div className="thumb-status timeline-thumb-floating">Could not generate thumbnails for this file.</div> : null}
 
             {videoLayerRows.map((videoLayer) => (
               <div
-                className={`timeline-track timeline-video-track ${videoLayer.id === activeVideoLayerId ? "active-video-layer-track" : ""}`}
+                className={`timeline-track timeline-track-with-thumbs timeline-video-track ${videoLayer.id === activeVideoLayerId ? "active-video-layer-track" : ""}`}
                 key={`video-track-${videoLayer.id}`}
                 data-layer-id={videoLayer.id}
                 style={{ height: `${trackHeight}px` }}
               >
+                {renderTrackThumbnails(`video-${videoLayer.id}`)}
                 {(videoClips || [])
                   .filter((clip) => (clip.videoLayerId || "") === videoLayer.id)
                   .map((clip, index) => {
@@ -815,7 +816,8 @@ function TimelineBar({
             ))}
 
             {layers.map((layer) => (
-              <div className="timeline-track" key={`track-${layer.id}`} style={{ height: `${trackHeight}px` }}>
+              <div className="timeline-track timeline-track-with-thumbs" key={`track-${layer.id}`} style={{ height: `${trackHeight}px` }}>
+                {renderTrackThumbnails(`draw-${layer.id}`)}
                 {(layer.strokes || []).map((stroke, index) => {
                   const windowMs = strokeClipWindowMs(stroke, fps, durationMs || Number.POSITIVE_INFINITY);
                   const clipStartSec = windowMs.clipStartMs / 1000;
