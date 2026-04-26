@@ -1,0 +1,27 @@
+Third-Party Notices
+===================
+
+This project includes third-party software packages.
+Package versions below reflect the currently installed lockfile state in this repository.
+
+Runtime dependencies
+--------------------
+- electron (MIT)
+- ffmpeg-static (GPL-3.0-or-later)
+- ffprobe-static (MIT)
+- react (MIT)
+- react-dom (MIT)
+
+Development dependencies
+------------------------
+- @vitejs/plugin-react (MIT)
+- concurrently (MIT)
+- cross-env (MIT)
+- vite (MIT)
+- wait-on (MIT)
+
+Notes
+-----
+- ffmpeg-static downloads FFmpeg binaries. Use and distribution of those binaries are
+  covered by their respective licenses and notices from upstream providers.
+- A broader transitive dependency graph is present in `package-lock.json`.
