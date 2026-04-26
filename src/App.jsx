@@ -855,17 +855,8 @@ function App() {
 
     try {
       if (video.paused) {
-        const globalMs = Math.max(0, (Number(currentTimeRef.current) || 0) * 1000);
-        const ordered = sortVideoClips(videoClipsRef.current);
-        const expectedClip = findVideoClipAtTime(ordered, globalMs, {
-          preferredLayerId: activeVideoLayerIdRef.current,
-          layerOrderIds: (videoLayersRef.current || []).map((layer) => layer.id)
-        });
-        if (!expectedClip || expectedClip.id !== currentVideoClipIdRef.current || expectedClip.url !== videoUrl) {
-          seekGlobalTimeMs(globalMs, { autoplay: true });
-          return;
-        }
-        await video.play();
+        const playFromMs = Math.max(0, (Number(currentTimeRef.current) || 0) * 1000);
+        seekGlobalTimeMs(playFromMs, { autoplay: true });
       } else {
         video.pause();
       }
