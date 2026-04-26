@@ -6,7 +6,10 @@ export const DEFAULT_BRUSH = {
   color: "#ff6d5a",
   size: 6,
   opacity: 1,
-  pressureEnabled: true
+  pressureEnabled: true,
+  pressureSensitivity: 1.7,
+  pressureCurve: 1.75,
+  pressureMinScale: 0.05
 };
 
 export const DEFAULT_VIDEO_META = {

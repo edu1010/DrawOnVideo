@@ -85,6 +85,58 @@ function Toolbar({
         </label>
       </div>
 
+      {brush.pressureEnabled ? (
+        <>
+          <div className="control-group">
+            <label htmlFor="pressure-sensitivity">
+              Pressure Sensitivity ({Number(brush.pressureSensitivity || 1).toFixed(2)})
+            </label>
+            <input
+              id="pressure-sensitivity"
+              type="range"
+              min={0.2}
+              max={4}
+              step={0.05}
+              value={Number(brush.pressureSensitivity) || 1}
+              onChange={(event) => onBrushChange({ pressureSensitivity: Number(event.target.value) })}
+              disabled={!canDraw}
+            />
+          </div>
+
+          <div className="control-group">
+            <label htmlFor="pressure-curve">
+              Pressure Curve ({Number(brush.pressureCurve || 1).toFixed(2)})
+            </label>
+            <input
+              id="pressure-curve"
+              type="range"
+              min={0.2}
+              max={4}
+              step={0.05}
+              value={Number(brush.pressureCurve) || 1}
+              onChange={(event) => onBrushChange({ pressureCurve: Number(event.target.value) })}
+              disabled={!canDraw}
+            />
+          </div>
+
+          <div className="control-group">
+            <label htmlFor="pressure-min-scale">
+              Min Pressure Size ({Math.round((Number(brush.pressureMinScale) || 0.05) * 100)}%)
+            </label>
+            <input
+              id="pressure-min-scale"
+              type="range"
+              min={0.02}
+              max={0.95}
+              step={0.01}
+              value={Number(brush.pressureMinScale) || 0.05}
+              onChange={(event) => onBrushChange({ pressureMinScale: Number(event.target.value) })}
+              disabled={!canDraw}
+            />
+          </div>
+        </>
+      ) : null}
+
       <div className="control-group checkbox-group">
         <label>
           <input

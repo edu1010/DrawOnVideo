@@ -96,7 +96,7 @@ function normalizePressure(pointerEvent, pressureEnabled, options = {}) {
     const previousPressure = Number(options.fallbackPressure);
     if (Number.isFinite(previousPressure) && previousPressure > 0) {
       // Smooth rapid pressure oscillations from tablet drivers.
-      const smoothed = previousPressure * 0.68 + hardwarePressure * 0.32;
+      const smoothed = previousPressure * 0.35 + hardwarePressure * 0.65;
       return clamp(smoothed, 0.05, 1);
     }
     return hardwarePressure;
@@ -127,6 +127,20 @@ function mediaErrorMessage(mediaError) {
     default:
       return mediaError.message || "Unknown playback error.";
   }
+}
+
+function normalizeBrushPatch(patch) {
+  const next = { ...patch };
+  if (Object.hasOwn(next, "pressureSensitivity")) {
+    next.pressureSensitivity = clamp(Number(next.pressureSensitivity) || 1, 0.2, 4);
+  }
+  if (Object.hasOwn(next, "pressureCurve")) {
+    next.pressureCurve = clamp(Number(next.pressureCurve) || 1, 0.2, 4);
+  }
+  if (Object.hasOwn(next, "pressureMinScale")) {
+    next.pressureMinScale = clamp(Number(next.pressureMinScale) || 0.05, 0.02, 0.95);
+  }
+  return next;
 }
 
 function clipSelectionKey(layerId, strokeId) {
@@ -621,6 +635,9 @@ function App() {
         size: brushRef.current.size,
         opacity: brushRef.current.opacity,
         pressureEnabled: brushRef.current.pressureEnabled,
+        pressureSensitivity: brushRef.current.pressureSensitivity,
+        pressureCurve: brushRef.current.pressureCurve,
+        pressureMinScale: brushRef.current.pressureMinScale,
         startFrame: frame,
         endFrame: frame,
         clipStartMs: nowMs,
@@ -1024,7 +1041,8 @@ function App() {
   const activeVideoLayer = videoLayers.find((layer) => layer.id === activeVideoLayerId);
 
   const handleBrushChange = useCallback((patch) => {
-    setBrush((prev) => ({ ...prev, ...patch }));
+    const normalizedPatch = normalizeBrushPatch(patch);
+    setBrush((prev) => ({ ...prev, ...normalizedPatch }));
     dirtyRef.current = true;
   }, []);
 

@@ -66,13 +66,30 @@ function strokeWidth(stroke, point) {
     return baseSize;
   }
 
-  const pressure = Number(point?.pressure);
-  if (!Number.isFinite(pressure) || pressure <= 0) {
+  const rawPressure = Number(point?.pressure);
+  if (!Number.isFinite(rawPressure) || rawPressure <= 0) {
     return baseSize;
   }
 
-  // Keep a minimum stroke width for low-pressure pen input.
-  return baseSize * Math.max(0.15, Math.min(pressure, 1));
+  const pressureSensitivity = Number.isFinite(Number(stroke.pressureSensitivity))
+    ? Math.max(0.2, Math.min(4, Number(stroke.pressureSensitivity)))
+    : 1.7;
+  const pressureCurve = Number.isFinite(Number(stroke.pressureCurve))
+    ? Math.max(0.2, Math.min(4, Number(stroke.pressureCurve)))
+    : 1.75;
+  const pressureMinScale = Number.isFinite(Number(stroke.pressureMinScale))
+    ? Math.max(0.02, Math.min(0.95, Number(stroke.pressureMinScale)))
+    : 0.05;
+
+  const normalized = Math.max(0, Math.min(1, rawPressure));
+  const sensitivityMapped = Math.max(
+    0,
+    Math.min(1, 0.5 + (normalized - 0.5) * pressureSensitivity)
+  );
+  const curved = Math.pow(sensitivityMapped, pressureCurve);
+  const widthScale = pressureMinScale + (1 - pressureMinScale) * curved;
+
+  return Math.max(0.2, baseSize * widthScale);
 }
 
 function drawStroke(ctx, stroke, pointsOverride = null) {

@@ -30,6 +30,15 @@ function normalizeStroke(stroke) {
     size: Number(stroke.size) || 6,
     opacity: Number(stroke.opacity) || 1,
     pressureEnabled: stroke.pressureEnabled !== false,
+    pressureSensitivity: Number.isFinite(Number(stroke.pressureSensitivity))
+      ? Math.max(0.2, Math.min(4, Number(stroke.pressureSensitivity)))
+      : 1.7,
+    pressureCurve: Number.isFinite(Number(stroke.pressureCurve))
+      ? Math.max(0.2, Math.min(4, Number(stroke.pressureCurve)))
+      : 1.75,
+    pressureMinScale: Number.isFinite(Number(stroke.pressureMinScale))
+      ? Math.max(0.02, Math.min(0.95, Number(stroke.pressureMinScale)))
+      : 0.05,
     startFrame: Number(stroke.startFrame) || 0,
     endFrame: Number(stroke.endFrame) || Number(stroke.startFrame) || 0,
     points: Array.isArray(stroke.points) ? stroke.points : []
