@@ -1,4 +1,4 @@
-import { TOOL_BRUSH, TOOL_ERASER } from "../constants";
+import { PRESSURE_PRESETS, TOOL_BRUSH, TOOL_ERASER } from "../constants";
 
 function Toolbar({
   brush,
@@ -87,6 +87,22 @@ function Toolbar({
 
       {brush.pressureEnabled ? (
         <>
+          <div className="control-group">
+            <label>Pressure Presets</label>
+            <div className="tool-row wrap">
+              {PRESSURE_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => onBrushChange(preset.values)}
+                  disabled={!canDraw}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="control-group">
             <label htmlFor="pressure-sensitivity">
               Pressure Sensitivity ({Number(brush.pressureSensitivity || 1).toFixed(2)})
