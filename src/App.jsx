@@ -893,7 +893,10 @@ function App() {
 
     try {
       if (video.paused) {
-        const playFromMs = Math.max(0, (Number(currentTime) || 0) * 1000);
+        const playFromSeconds = Number.isFinite(Number(currentTimeRef.current))
+          ? Number(currentTimeRef.current)
+          : (Number(currentTime) || 0);
+        const playFromMs = Math.max(0, playFromSeconds * 1000);
         currentTimeRef.current = playFromMs / 1000;
         const ordered = sortVideoClips(videoClipsRef.current);
         const targetClip = findVideoClipAtTime(ordered, playFromMs, {
