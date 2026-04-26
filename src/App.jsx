@@ -372,8 +372,11 @@ function App() {
         const globalMs = activeClip
           ? (Number(activeClip.timelineStartMs) || 0) + (localMs - (Number(activeClip.sourceStartMs) || 0))
           : localMs;
-        const now = Math.max(0, globalMs / 1000);
-        const frame = Math.round(now * (videoMetaRef.current.fps || 30));
+        const mediaNow = Math.max(0, globalMs / 1000);
+        const timelineNow = isPlaying
+          ? mediaNow
+          : Math.max(0, Number(currentTimeRef.current) || 0);
+        const frame = Math.round(timelineNow * (videoMetaRef.current.fps || 30));
         const shouldRender =
           dirtyRef.current ||
           isPlaying ||
@@ -381,14 +384,14 @@ function App() {
           frame !== lastFrameRef.current;
 
         if (shouldRender) {
-          drawOverlay(now);
+          drawOverlay(timelineNow);
           dirtyRef.current = false;
           lastFrameRef.current = frame;
         }
 
-        if (Math.abs(currentTimeRef.current - now) >= 1 / 120) {
-          currentTimeRef.current = now;
-          setCurrentTime(now);
+        if (isPlaying && Math.abs(currentTimeRef.current - mediaNow) >= 1 / 120) {
+          currentTimeRef.current = mediaNow;
+          setCurrentTime(mediaNow);
         }
 
         const visibleClip = findVideoClipAtTime(orderedClips, globalMs, {
@@ -894,12 +897,7 @@ function App() {
 
       const safeDirection = Number(direction) >= 0 ? 1 : -1;
       const safeFps = Math.max(Number(videoMetaRef.current.fps) || 30, 1);
-      const ordered = sortVideoClips(videoClipsRef.current);
-      const clipFromCurrent = ordered.find((clip) => clip.id === currentVideoClipIdRef.current) || null;
-      const localMs = (Number(video.currentTime) || 0) * 1000;
-      const baseGlobalMs = clipFromCurrent
-        ? (Number(clipFromCurrent.timelineStartMs) || 0) + (localMs - (Number(clipFromCurrent.sourceStartMs) || 0))
-        : Math.max(0, (Number(currentTimeRef.current) || Number(currentTime) || 0) * 1000);
+      const baseGlobalMs = Math.max(0, (Number(currentTimeRef.current) || Number(currentTime) || 0) * 1000);
       const nextGlobalMs = Math.max(0, baseGlobalMs + safeDirection * (1000 / safeFps));
 
       video.pause();
