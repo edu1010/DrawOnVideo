@@ -161,7 +161,8 @@ function pointsUntilTime(stroke, timeMs) {
 
     const span = nextTime - prevTime;
     if (span <= 0) {
-      break;
+      partial.push(next);
+      continue;
     }
 
     const t = (timeMs - prevTime) / span;

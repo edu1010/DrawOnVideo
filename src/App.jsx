@@ -64,14 +64,6 @@ function fileNameFromPath(filePath) {
   return parts[parts.length - 1] || filePath;
 }
 
-function simulatedPressureFromMotion(distancePx, deltaTimeMs) {
-  const distance = Math.max(0, Number(distancePx) || 0);
-  const delta = Math.max(1, Number(deltaTimeMs) || 1);
-  const speed = distance / delta;
-  const simulated = 1.05 - speed * 1.2;
-  return clamp(simulated, 0.12, 1);
-}
-
 function extractHardwarePressure(pointerEvent) {
   const directPressure = Number(pointerEvent.pressure);
   if (Number.isFinite(directPressure) && directPressure > 0) {
@@ -95,15 +87,19 @@ function normalizePressure(pointerEvent, pressureEnabled, options = {}) {
     return 1;
   }
 
-  const hardwarePressure = extractHardwarePressure(pointerEvent);
-  if (hardwarePressure !== null) {
-    return hardwarePressure;
+  if (pointerEvent.pointerType === "mouse") {
+    return 1;
   }
 
-  const motionDistancePx = Number(options.motionDistancePx);
-  const motionDeltaMs = Number(options.motionDeltaMs);
-  if (Number.isFinite(motionDistancePx) && Number.isFinite(motionDeltaMs) && motionDistancePx > 0) {
-    return simulatedPressureFromMotion(motionDistancePx, motionDeltaMs);
+  const hardwarePressure = extractHardwarePressure(pointerEvent);
+  if (hardwarePressure !== null) {
+    const previousPressure = Number(options.fallbackPressure);
+    if (Number.isFinite(previousPressure) && previousPressure > 0) {
+      // Smooth rapid pressure oscillations from tablet drivers.
+      const smoothed = previousPressure * 0.68 + hardwarePressure * 0.32;
+      return clamp(smoothed, 0.05, 1);
+    }
+    return hardwarePressure;
   }
 
   const fallbackPressure = Number(options.fallbackPressure);
@@ -635,7 +631,6 @@ function App() {
           {
             ...point,
             timeMs: nowMs,
-            eventTimeMs: Number(event.timeStamp) || performance.now(),
             pressure: normalizePressure(event, brushRef.current.pressureEnabled)
           }
         ]
@@ -670,21 +665,13 @@ function App() {
 
       const nowSeconds = videoRef.current?.currentTime || 0;
       const nowMs = nowSeconds * 1000;
-      const eventTimeMs = Number(event.timeStamp) || performance.now();
-      const previousEventTimeMs = Number(previousPoint.eventTimeMs);
-      const motionDeltaMs = Number.isFinite(previousEventTimeMs) && previousEventTimeMs > 0
-        ? Math.max(1, eventTimeMs - previousEventTimeMs)
-        : 16;
       const frame = frameFromTimeMs(nowMs, videoMetaRef.current.fps);
 
       stroke.points.push({
         ...point,
         timeMs: nowMs,
-        eventTimeMs,
         pressure: normalizePressure(event, stroke.pressureEnabled, {
-          fallbackPressure: previousPoint.pressure,
-          motionDistancePx,
-          motionDeltaMs
+          fallbackPressure: previousPoint.pressure
         })
       });
       stroke.endFrame = Math.max(stroke.endFrame, frame);
