@@ -260,14 +260,17 @@ function App() {
     const { autoplay = false } = options;
     const ordered = sortVideoClips(videoClipsRef.current);
     const totalMs = totalTimelineDurationMs(ordered);
+    const video = videoRef.current;
     const metaDurationMs = Math.max(0, (Number(videoMetaRef.current.duration) || 0) * 1000);
-    const effectiveTotalMs = Math.max(totalMs, metaDurationMs);
+    const mediaDurationMs = Number.isFinite(Number(video?.duration))
+      ? Number(video.duration) * 1000
+      : 0;
+    const effectiveTotalMs = Math.max(totalMs, metaDurationMs, mediaDurationMs);
     const safeTargetMs = clamp(Number(targetMs) || 0, 0, effectiveTotalMs);
     const clip = findVideoClipAtTime(ordered, safeTargetMs, {
       preferredLayerId: activeVideoLayerIdRef.current,
       layerOrderIds: (videoLayersRef.current || []).map((layer) => layer.id)
     });
-    const video = videoRef.current;
 
     if (!clip || !video) {
       currentTimeRef.current = safeTargetMs / 1000;
@@ -384,11 +387,12 @@ function App() {
         }
 
         if (
-          visibleClip
-          && visibleClip.id !== currentVideoClipIdRef.current
+          isPlaying
           && pendingVideoSeekRef.current === null
+          && visibleClip
+          && visibleClip.id !== currentVideoClipIdRef.current
         ) {
-          seekGlobalTimeMs(globalMs, { autoplay: isPlaying });
+          seekGlobalTimeMs(globalMs, { autoplay: true });
         }
 
         if (isPlaying && activeClip) {
@@ -828,7 +832,17 @@ function App() {
 
     try {
       if (video.paused) {
-        seekGlobalTimeMs(currentTimeRef.current * 1000, { autoplay: true });
+        const globalMs = Math.max(0, (Number(currentTimeRef.current) || 0) * 1000);
+        const ordered = sortVideoClips(videoClipsRef.current);
+        const expectedClip = findVideoClipAtTime(ordered, globalMs, {
+          preferredLayerId: activeVideoLayerIdRef.current,
+          layerOrderIds: (videoLayersRef.current || []).map((layer) => layer.id)
+        });
+        if (!expectedClip || expectedClip.id !== currentVideoClipIdRef.current || expectedClip.url !== videoUrl) {
+          seekGlobalTimeMs(globalMs, { autoplay: true });
+          return;
+        }
+        await video.play();
       } else {
         video.pause();
       }
@@ -843,7 +857,10 @@ function App() {
     }
 
     const timelineDuration = totalTimelineDurationMs(videoClipsRef.current) / 1000;
-    const duration = Math.max(Number(videoMetaRef.current.duration) || 0, timelineDuration);
+    const mediaDuration = Number.isFinite(Number(videoRef.current?.duration))
+      ? Number(videoRef.current.duration)
+      : 0;
+    const duration = Math.max(Number(videoMetaRef.current.duration) || 0, timelineDuration, mediaDuration);
     const safeTime = clamp(nextTime, 0, duration);
     seekGlobalTimeMs(safeTime * 1000, { autoplay: false });
   }, [seekGlobalTimeMs]);
