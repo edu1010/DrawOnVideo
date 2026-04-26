@@ -855,7 +855,8 @@ function App() {
 
     try {
       if (video.paused) {
-        const playFromMs = Math.max(0, (Number(currentTimeRef.current) || 0) * 1000);
+        const playFromMs = Math.max(0, (Number(currentTime) || 0) * 1000);
+        currentTimeRef.current = playFromMs / 1000;
         seekGlobalTimeMs(playFromMs, { autoplay: true });
       } else {
         video.pause();
@@ -863,7 +864,7 @@ function App() {
     } catch (error) {
       setStatus(`Playback error: ${error.message}`);
     }
-  }, [seekGlobalTimeMs, videoUrl]);
+  }, [currentTime, seekGlobalTimeMs, videoUrl]);
 
   const handleSeek = useCallback((nextTime) => {
     if (videoClipsRef.current.length === 0) {
