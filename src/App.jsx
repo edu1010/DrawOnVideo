@@ -132,6 +132,43 @@ function clipLocalRangeMs(clip, videoDurationMs = 0) {
   return { startMs, endMs: startMs + 1000 };
 }
 
+function playAfterSeek(video, targetSeconds) {
+  const desiredSeconds = Math.max(0, Number(targetSeconds) || 0);
+  const currentSeconds = Math.max(0, Number(video.currentTime) || 0);
+  const epsilon = 1 / 240;
+
+  if (Math.abs(currentSeconds - desiredSeconds) <= epsilon) {
+    video.play().catch(() => {});
+    return;
+  }
+
+  let fallbackId = null;
+  let settled = false;
+
+  const cleanup = () => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    video.removeEventListener("seeked", onSeeked);
+    if (fallbackId !== null) {
+      window.clearTimeout(fallbackId);
+    }
+  };
+
+  const onSeeked = () => {
+    cleanup();
+    video.play().catch(() => {});
+  };
+
+  video.addEventListener("seeked", onSeeked, { once: true });
+  fallbackId = window.setTimeout(() => {
+    cleanup();
+    video.play().catch(() => {});
+  }, 180);
+  video.currentTime = desiredSeconds;
+}
+
 function App() {
   const initialLayer = useMemo(() => createLayer("Layer 1"), []);
   const initialVideoLayer = useMemo(() => createVideoLayer("Video 1"), []);
@@ -328,9 +365,10 @@ function App() {
       setActiveVideoLayerId(clip.videoLayerId);
     }
 
-    video.currentTime = localMs / 1000;
     if (autoplay) {
-      video.play().catch(() => {});
+      playAfterSeek(video, localMs / 1000);
+    } else {
+      video.currentTime = localMs / 1000;
     }
   }, [videoUrl]);
 
@@ -1502,9 +1540,11 @@ function App() {
                       if (pendingSeek.clipId && pendingSeek.clipId !== currentVideoClipIdRef.current) {
                         setCurrentVideoClipId(pendingSeek.clipId);
                       }
-                      video.currentTime = (Number(pendingSeek.localMs) || 0) / 1000;
+                      const pendingSeconds = (Number(pendingSeek.localMs) || 0) / 1000;
                       if (pendingSeek.autoplay) {
-                        video.play().catch(() => {});
+                        playAfterSeek(video, pendingSeconds);
+                      } else {
+                        video.currentTime = pendingSeconds;
                       }
                       pendingVideoSeekRef.current = null;
                     }
