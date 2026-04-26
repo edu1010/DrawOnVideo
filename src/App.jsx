@@ -265,8 +265,28 @@ function App() {
     const mediaDurationMs = Number.isFinite(Number(video?.duration))
       ? Number(video.duration) * 1000
       : 0;
-    const effectiveTotalMs = Math.max(totalMs, metaDurationMs, mediaDurationMs);
-    const safeTargetMs = clamp(Number(targetMs) || 0, 0, effectiveTotalMs);
+    const requestedTargetMs = Math.max(0, Number(targetMs) || 0);
+    let effectiveTotalMs = Math.max(totalMs, metaDurationMs, mediaDurationMs);
+
+    if (effectiveTotalMs <= 0 && ordered.length > 0) {
+      const activeClip = ordered.find((clip) => clip.id === currentVideoClipIdRef.current) || ordered[0];
+      if (activeClip) {
+        const activeRange = clipLocalRangeMs(activeClip, mediaDurationMs);
+        const activeClipDurationMs = Math.max(0, activeRange.endMs - activeRange.startMs);
+        effectiveTotalMs = Math.max(
+          effectiveTotalMs,
+          (Number(activeClip.timelineStartMs) || 0) + activeClipDurationMs
+        );
+      }
+    }
+
+    if (effectiveTotalMs <= 0) {
+      effectiveTotalMs = requestedTargetMs;
+    }
+
+    const safeTargetMs = effectiveTotalMs > 0
+      ? clamp(requestedTargetMs, 0, effectiveTotalMs)
+      : requestedTargetMs;
     const clip = findVideoClipAtTime(ordered, safeTargetMs, {
       preferredLayerId: activeVideoLayerIdRef.current,
       layerOrderIds: (videoLayersRef.current || []).map((layer) => layer.id)
@@ -278,7 +298,7 @@ function App() {
       return;
     }
 
-    const safeGlobalMs = clamp(Number(targetMs) || 0, 0, effectiveTotalMs);
+    const safeGlobalMs = safeTargetMs;
     const timelineStartMs = Number(clip.timelineStartMs) || 0;
     const loadedVideoDurationMs = Number.isFinite(Number(video.duration)) ? Number(video.duration) * 1000 : 0;
     const localRange = clipLocalRangeMs(clip, loadedVideoDurationMs);
@@ -874,16 +894,17 @@ function App() {
 
       const safeDirection = Number(direction) >= 0 ? 1 : -1;
       const safeFps = Math.max(Number(videoMetaRef.current.fps) || 30, 1);
-      const baseTime = Number.isFinite(currentTimeRef.current)
-        ? currentTimeRef.current
-        : (Number(currentTime) || 0);
-      const baseFrame = Math.max(0, Math.round(baseTime * safeFps));
-      const nextFrame = Math.max(0, baseFrame + safeDirection);
-      const nextTime = nextFrame / safeFps;
+      const ordered = sortVideoClips(videoClipsRef.current);
+      const clipFromCurrent = ordered.find((clip) => clip.id === currentVideoClipIdRef.current) || null;
+      const localMs = (Number(video.currentTime) || 0) * 1000;
+      const baseGlobalMs = clipFromCurrent
+        ? (Number(clipFromCurrent.timelineStartMs) || 0) + (localMs - (Number(clipFromCurrent.sourceStartMs) || 0))
+        : Math.max(0, (Number(currentTimeRef.current) || Number(currentTime) || 0) * 1000);
+      const nextGlobalMs = Math.max(0, baseGlobalMs + safeDirection * (1000 / safeFps));
 
       video.pause();
       setIsPlaying(false);
-      seekGlobalTimeMs(nextTime * 1000, { autoplay: false });
+      seekGlobalTimeMs(nextGlobalMs, { autoplay: false });
     },
     [currentTime, seekGlobalTimeMs]
   );
