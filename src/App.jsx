@@ -64,17 +64,54 @@ function fileNameFromPath(filePath) {
   return parts[parts.length - 1] || filePath;
 }
 
-function normalizePressure(pointerEvent, pressureEnabled) {
-  if (!pressureEnabled || pointerEvent.pointerType === "mouse") {
+function simulatedPressureFromMotion(distancePx, deltaTimeMs) {
+  const distance = Math.max(0, Number(distancePx) || 0);
+  const delta = Math.max(1, Number(deltaTimeMs) || 1);
+  const speed = distance / delta;
+  const simulated = 1.05 - speed * 1.2;
+  return clamp(simulated, 0.12, 1);
+}
+
+function extractHardwarePressure(pointerEvent) {
+  const directPressure = Number(pointerEvent.pressure);
+  if (Number.isFinite(directPressure) && directPressure > 0) {
+    // Mouse pointers usually report 0.5 while pressed, which is not real pressure data.
+    if (pointerEvent.pointerType === "mouse" && Math.abs(directPressure - 0.5) < 0.0001) {
+      return null;
+    }
+    return clamp(directPressure, 0.05, 1);
+  }
+
+  const fallbackForce = Number(pointerEvent.force ?? pointerEvent.webkitForce);
+  if (Number.isFinite(fallbackForce) && fallbackForce > 0) {
+    return clamp(fallbackForce, 0.05, 1);
+  }
+
+  return null;
+}
+
+function normalizePressure(pointerEvent, pressureEnabled, options = {}) {
+  if (!pressureEnabled) {
     return 1;
   }
 
-  const pressure = Number(pointerEvent.pressure);
-  if (!Number.isFinite(pressure) || pressure <= 0) {
-    return 1;
+  const hardwarePressure = extractHardwarePressure(pointerEvent);
+  if (hardwarePressure !== null) {
+    return hardwarePressure;
   }
 
-  return Math.min(1, Math.max(0.05, pressure));
+  const motionDistancePx = Number(options.motionDistancePx);
+  const motionDeltaMs = Number(options.motionDeltaMs);
+  if (Number.isFinite(motionDistancePx) && Number.isFinite(motionDeltaMs) && motionDistancePx > 0) {
+    return simulatedPressureFromMotion(motionDistancePx, motionDeltaMs);
+  }
+
+  const fallbackPressure = Number(options.fallbackPressure);
+  if (Number.isFinite(fallbackPressure) && fallbackPressure > 0) {
+    return clamp(fallbackPressure, 0.05, 1);
+  }
+
+  return 1;
 }
 
 function mediaErrorMessage(mediaError) {
@@ -207,6 +244,7 @@ function App() {
   const brushRef = useRef(brush);
   const onionSkinRef = useRef(onionSkin);
   const currentTimeRef = useRef(0);
+  const playheadMsRef = useRef(0);
 
   const activeStrokeRef = useRef(null);
   const pointerIdRef = useRef(null);
@@ -215,6 +253,14 @@ function App() {
   const lastFrameRef = useRef(-1);
   const resizeRef = useRef(null);
   const pendingVideoSeekRef = useRef(null);
+
+  const setPlayheadMs = useCallback((nextMs) => {
+    const safeMs = Math.max(0, Number(nextMs) || 0);
+    playheadMsRef.current = safeMs;
+    const safeSeconds = safeMs / 1000;
+    currentTimeRef.current = safeSeconds;
+    setCurrentTime(safeSeconds);
+  }, []);
 
   useEffect(() => {
     videoLayersRef.current = videoLayers;
@@ -330,8 +376,7 @@ function App() {
     });
 
     if (!clip || !video) {
-      currentTimeRef.current = safeTargetMs / 1000;
-      setCurrentTime(safeTargetMs / 1000);
+      setPlayheadMs(safeTargetMs);
       return;
     }
 
@@ -342,8 +387,7 @@ function App() {
     const unclampedLocalMs = localRange.startMs + (safeGlobalMs - timelineStartMs);
     const localMs = clamp(unclampedLocalMs, localRange.startMs, localRange.endMs);
 
-    currentTimeRef.current = safeGlobalMs / 1000;
-    setCurrentTime(safeGlobalMs / 1000);
+    setPlayheadMs(safeGlobalMs);
     dirtyRef.current = true;
 
     const needsSourceSwap = videoUrl !== clip.url;
@@ -428,8 +472,7 @@ function App() {
         }
 
         if (isPlaying && Math.abs(currentTimeRef.current - mediaNow) >= 1 / 120) {
-          currentTimeRef.current = mediaNow;
-          setCurrentTime(mediaNow);
+          setPlayheadMs(mediaNow * 1000);
         }
 
         const visibleClip = findVideoClipAtTime(orderedClips, globalMs, {
@@ -484,7 +527,7 @@ function App() {
 
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, [drawOverlay, isPlaying, seekGlobalTimeMs, videoUrl]);
+  }, [drawOverlay, isPlaying, seekGlobalTimeMs, setPlayheadMs, videoUrl]);
 
   useEffect(() => {
     if (!layers.some((layer) => layer.id === activeLayerId)) {
@@ -592,6 +635,7 @@ function App() {
           {
             ...point,
             timeMs: nowMs,
+            eventTimeMs: Number(event.timeStamp) || performance.now(),
             pressure: normalizePressure(event, brushRef.current.pressureEnabled)
           }
         ]
@@ -618,19 +662,30 @@ function App() {
       const previousPoint = stroke.points[stroke.points.length - 1];
       const deltaX = point.x - previousPoint.x;
       const deltaY = point.y - previousPoint.y;
+      const motionDistancePx = Math.hypot(deltaX, deltaY);
 
-      if (Math.hypot(deltaX, deltaY) < 0.15) {
+      if (motionDistancePx < 0.15) {
         return;
       }
 
       const nowSeconds = videoRef.current?.currentTime || 0;
       const nowMs = nowSeconds * 1000;
+      const eventTimeMs = Number(event.timeStamp) || performance.now();
+      const previousEventTimeMs = Number(previousPoint.eventTimeMs);
+      const motionDeltaMs = Number.isFinite(previousEventTimeMs) && previousEventTimeMs > 0
+        ? Math.max(1, eventTimeMs - previousEventTimeMs)
+        : 16;
       const frame = frameFromTimeMs(nowMs, videoMetaRef.current.fps);
 
       stroke.points.push({
         ...point,
         timeMs: nowMs,
-        pressure: normalizePressure(event, stroke.pressureEnabled)
+        eventTimeMs,
+        pressure: normalizePressure(event, stroke.pressureEnabled, {
+          fallbackPressure: previousPoint.pressure,
+          motionDistancePx,
+          motionDeltaMs
+        })
       });
       stroke.endFrame = Math.max(stroke.endFrame, frame);
 
@@ -722,8 +777,7 @@ function App() {
       setSelectedClips([]);
       setSelectedVideoClipIds([]);
       const initialTime = (initialClip?.timelineStartMs || 0) / 1000;
-      setCurrentTime(initialTime);
-      currentTimeRef.current = initialTime;
+      setPlayheadMs(initialTime * 1000);
       renderStateRef.current = createRenderState();
       dirtyRef.current = true;
       setStatus(`Loaded video: ${selected}`);
@@ -869,8 +923,7 @@ function App() {
       setActiveLayerId(nextLayers[0]?.id || createLayer("Layer 1").id);
       setSelectedClips([]);
       setSelectedVideoClipIds([]);
-      setCurrentTime(0);
-      currentTimeRef.current = 0;
+      setPlayheadMs(0);
       renderStateRef.current = createRenderState();
       dirtyRef.current = true;
       setStatus(`Project loaded: ${loaded.filePath}`);
@@ -893,11 +946,13 @@ function App() {
 
     try {
       if (video.paused) {
-        const playFromSeconds = Number.isFinite(Number(currentTimeRef.current))
-          ? Number(currentTimeRef.current)
-          : (Number(currentTime) || 0);
-        const playFromMs = Math.max(0, playFromSeconds * 1000);
-        currentTimeRef.current = playFromMs / 1000;
+        const playFromMs = Math.max(
+          0,
+          Number.isFinite(Number(playheadMsRef.current))
+            ? Number(playheadMsRef.current)
+            : (Number(currentTimeRef.current) || Number(currentTime) || 0) * 1000
+        );
+        setPlayheadMs(playFromMs);
         const ordered = sortVideoClips(videoClipsRef.current);
         const targetClip = findVideoClipAtTime(ordered, playFromMs, {
           preferredLayerId: activeVideoLayerIdRef.current,
@@ -918,8 +973,6 @@ function App() {
           localRange.endMs
         );
         const needsSourceSwap = videoUrl !== targetClip.url;
-
-        setCurrentTime(playFromMs / 1000);
 
         if (currentVideoClipIdRef.current !== targetClip.id) {
           setCurrentVideoClipId(targetClip.id);
@@ -945,7 +998,7 @@ function App() {
     } catch (error) {
       setStatus(`Playback error: ${error.message}`);
     }
-  }, [currentTime, seekGlobalTimeMs, videoUrl]);
+  }, [currentTime, seekGlobalTimeMs, setPlayheadMs, videoUrl]);
 
   const handleSeek = useCallback((nextTime) => {
     if (videoClipsRef.current.length === 0) {
@@ -1323,8 +1376,7 @@ function App() {
       setCurrentVideoClipId(null);
       setVideoUrl("");
       setVideoPath("");
-      setCurrentTime(0);
-      currentTimeRef.current = 0;
+      setPlayheadMs(0);
       return;
     }
 
@@ -1336,7 +1388,7 @@ function App() {
       setVideoPath(first.path);
       seekGlobalTimeMs(first.timelineStartMs || 0, { autoplay: false });
     }
-  }, [seekGlobalTimeMs, videoClips]);
+  }, [seekGlobalTimeMs, setPlayheadMs, videoClips]);
 
   useEffect(() => {
     const onKeyDown = (event) => {
