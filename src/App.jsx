@@ -895,7 +895,47 @@ function App() {
       if (video.paused) {
         const playFromMs = Math.max(0, (Number(currentTime) || 0) * 1000);
         currentTimeRef.current = playFromMs / 1000;
-        seekGlobalTimeMs(playFromMs, { autoplay: true });
+        const ordered = sortVideoClips(videoClipsRef.current);
+        const targetClip = findVideoClipAtTime(ordered, playFromMs, {
+          preferredLayerId: activeVideoLayerIdRef.current,
+          layerOrderIds: (videoLayersRef.current || []).map((layer) => layer.id)
+        });
+
+        if (!targetClip) {
+          seekGlobalTimeMs(playFromMs, { autoplay: true });
+          return;
+        }
+
+        const timelineStartMs = Number(targetClip.timelineStartMs) || 0;
+        const loadedVideoDurationMs = Number.isFinite(Number(video.duration)) ? Number(video.duration) * 1000 : 0;
+        const localRange = clipLocalRangeMs(targetClip, loadedVideoDurationMs);
+        const localMs = clamp(
+          localRange.startMs + (playFromMs - timelineStartMs),
+          localRange.startMs,
+          localRange.endMs
+        );
+        const needsSourceSwap = videoUrl !== targetClip.url;
+
+        setCurrentTime(playFromMs / 1000);
+
+        if (currentVideoClipIdRef.current !== targetClip.id) {
+          setCurrentVideoClipId(targetClip.id);
+        }
+        if (targetClip.videoLayerId && targetClip.videoLayerId !== activeVideoLayerIdRef.current) {
+          setActiveVideoLayerId(targetClip.videoLayerId);
+        }
+
+        if (needsSourceSwap) {
+          pendingVideoSeekRef.current = {
+            clipId: targetClip.id,
+            localMs,
+            autoplay: true
+          };
+          setVideoUrl(targetClip.url);
+          return;
+        }
+
+        playAfterSeek(video, localMs / 1000);
       } else {
         video.pause();
       }
