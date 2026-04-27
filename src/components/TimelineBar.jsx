@@ -341,7 +341,7 @@ function TimelineBar({
     );
 
     if (uniqueUrls.length === 0) {
-      setAudioPeaksByUrl({});
+      setAudioPeaksByUrl((prev) => (Object.keys(prev).length > 0 ? {} : prev));
       return () => {
         cancelled = true;
       };

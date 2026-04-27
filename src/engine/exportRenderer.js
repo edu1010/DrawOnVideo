@@ -1,5 +1,5 @@
 import { createRenderState, renderAnnotationOverlay } from "./rendering";
-import { clipTimelineEndMs, sortVideoClips, totalTimelineDurationMs } from "../utils/videoClipOps";
+import { clipTimelineEndMs, findVideoClipAtTime, sortVideoClips, totalTimelineDurationMs } from "../utils/videoClipOps";
 
 function waitForEvent(target, eventName) {
   return new Promise((resolve, reject) => {
@@ -45,9 +45,78 @@ function drawVideoContain(ctx, video, width, height) {
   ctx.drawImage(video, left, top, drawWidth, drawHeight);
 }
 
+function clipLocalRangeMs(clip, videoDurationMs = 0) {
+  const startMs = Math.max(0, Number(clip?.sourceStartMs) || 0);
+  const explicitEnd = Number(clip?.sourceEndMs);
+  if (Number.isFinite(explicitEnd) && explicitEnd >= startMs) {
+    return { startMs, endMs: explicitEnd };
+  }
+
+  const sourceDuration = Number(clip?.sourceDurationMs);
+  if (Number.isFinite(sourceDuration) && sourceDuration > startMs) {
+    return { startMs, endMs: sourceDuration };
+  }
+
+  if (Number.isFinite(videoDurationMs) && videoDurationMs > 0) {
+    return { startMs, endMs: startMs + videoDurationMs };
+  }
+
+  return { startMs, endMs: startMs + 1000 };
+}
+
+function clipLocalMsAtTimelineMs(clip, globalMs, videoDurationMs = 0) {
+  const timelineStartMs = Number(clip?.timelineStartMs) || 0;
+  const localRange = clipLocalRangeMs(clip, videoDurationMs);
+  const localMs = localRange.startMs + (Math.max(0, Number(globalMs) || 0) - timelineStartMs);
+  return Math.min(localRange.endMs, Math.max(localRange.startMs, localMs));
+}
+
+function resolveSameLayerCrossfade(clips, activeClip, globalMs) {
+  if (!activeClip) {
+    return null;
+  }
+
+  const t = Math.max(0, Number(globalMs) || 0);
+  const activeStartMs = Number(activeClip.timelineStartMs) || 0;
+  const activeEndMs = clipTimelineEndMs(activeClip);
+  const activeLayerId = String(activeClip.videoLayerId || "");
+
+  const outgoingClip = sortVideoClips(clips)
+    .filter((clip) => {
+      if (clip.id === activeClip.id || String(clip.videoLayerId || "") !== activeLayerId) {
+        return false;
+      }
+
+      const startMs = Number(clip.timelineStartMs) || 0;
+      const endMs = clipTimelineEndMs(clip);
+      return startMs <= activeStartMs && t >= startMs && t < endMs;
+    })
+    .sort((a, b) => (Number(b.timelineStartMs) || 0) - (Number(a.timelineStartMs) || 0))[0];
+
+  if (!outgoingClip) {
+    return null;
+  }
+
+  const outgoingStartMs = Number(outgoingClip.timelineStartMs) || 0;
+  const overlapStartMs = Math.max(activeStartMs, outgoingStartMs);
+  const overlapEndMs = Math.min(activeEndMs, clipTimelineEndMs(outgoingClip));
+  const overlapDurationMs = overlapEndMs - overlapStartMs;
+
+  if (overlapDurationMs <= 1 || t < overlapStartMs || t >= overlapEndMs) {
+    return null;
+  }
+
+  const progress = Math.min(1, Math.max(0, (t - overlapStartMs) / overlapDurationMs));
+  return {
+    outgoingClip,
+    outgoingOpacity: 1 - progress
+  };
+}
+
 export async function renderAndRecordAnnotatedVideo({
   videoUrl,
   videoClips,
+  videoLayers = [],
   layers,
   videoMeta,
   onionSkin = false,
@@ -55,11 +124,16 @@ export async function renderAndRecordAnnotatedVideo({
   onProgress,
   recordingBitrate = 14_000_000
 }) {
-  const exportVideo = document.createElement("video");
-  exportVideo.crossOrigin = "anonymous";
-  exportVideo.muted = true;
-  exportVideo.playsInline = true;
-  exportVideo.preload = "auto";
+  const createExportVideo = () => {
+    const video = document.createElement("video");
+    video.crossOrigin = "anonymous";
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    return video;
+  };
+  const exportVideo = createExportVideo();
+  const blendVideo = createExportVideo();
   const width = Math.max(1, Number(videoMeta?.width) || 1280);
   const height = Math.max(1, Number(videoMeta?.height) || 720);
   const fps = Number(outputFps) > 0
@@ -80,6 +154,7 @@ export async function renderAndRecordAnnotatedVideo({
     ? Math.max(Number(videoMeta.duration) * 1000, totalTimelineDurationMs(timelineClips))
     : totalTimelineDurationMs(timelineClips);
   const durationSeconds = Math.max(0.001, durationMs / 1000);
+  const layerOrderIds = (videoLayers || []).map((layer) => layer.id);
 
   const exportCanvas = document.createElement("canvas");
   exportCanvas.width = width;
@@ -120,35 +195,65 @@ export async function renderAndRecordAnnotatedVideo({
   });
 
   const renderState = createRenderState();
-  let currentLoadedUrl = "";
-
-  const loadVideoSource = async (sourceUrl) => {
-    if (!sourceUrl) {
-      throw new Error("Missing clip video URL for export.");
-    }
-
-    if (currentLoadedUrl !== sourceUrl) {
-      exportVideo.src = sourceUrl;
-      currentLoadedUrl = sourceUrl;
-      await waitForEvent(exportVideo, "loadedmetadata");
-    }
-  };
+  const loadedUrls = new WeakMap();
+  const frameStepMs = 1000 / Math.max(fps, 1);
 
   const waitNextFrame = () =>
     new Promise((resolve) => {
       window.setTimeout(resolve, frameStepMs);
     });
 
-  recorder.start(250);
-  const frameToleranceSeconds = 1 / Math.max(fps, 1);
-  const frameStepMs = 1000 / Math.max(fps, 1);
+  const loadVideoSource = async (video, sourceUrl) => {
+    if (!sourceUrl) {
+      throw new Error("Missing clip video URL for export.");
+    }
 
-  const drawCompositeFrame = (globalMs, drawVideo) => {
+    if (loadedUrls.get(video) !== sourceUrl) {
+      video.src = sourceUrl;
+      loadedUrls.set(video, sourceUrl);
+      await waitForEvent(video, "loadedmetadata");
+    }
+  };
+
+  const seekVideoFrame = async (video, targetSeconds) => {
+    const safeSeconds = Math.max(0, Number(targetSeconds) || 0);
+    if (Math.abs((Number(video.currentTime) || 0) - safeSeconds) <= 0.001) {
+      return;
+    }
+
+    video.currentTime = safeSeconds;
+    await waitForEvent(video, "seeked");
+  };
+
+  const drawClipFrame = async (video, clip, globalMs, alpha = 1) => {
+    await loadVideoSource(video, clip.url || videoUrl);
+    const localMs = clipLocalMsAtTimelineMs(
+      clip,
+      globalMs,
+      Number.isFinite(Number(video.duration)) ? Number(video.duration) * 1000 : 0
+    );
+    await seekVideoFrame(video, localMs / 1000);
+
+    exportCtx.save();
+    exportCtx.globalAlpha = Math.min(1, Math.max(0, Number(alpha)));
+    drawVideoContain(exportCtx, video, width, height);
+    exportCtx.restore();
+  };
+
+  recorder.start(250);
+
+  const drawCompositeFrame = async (globalMs) => {
     exportCtx.fillStyle = "#000000";
     exportCtx.fillRect(0, 0, width, height);
 
-    if (drawVideo) {
-      drawVideoContain(exportCtx, exportVideo, width, height);
+    const activeClip = findVideoClipAtTime(timelineClips, globalMs, { layerOrderIds });
+    if (activeClip) {
+      await drawClipFrame(exportVideo, activeClip, globalMs, 1);
+
+      const crossfade = resolveSameLayerCrossfade(timelineClips, activeClip, globalMs);
+      if (crossfade?.outgoingClip) {
+        await drawClipFrame(blendVideo, crossfade.outgoingClip, globalMs, crossfade.outgoingOpacity);
+      }
     }
 
     renderAnnotationOverlay({
@@ -168,89 +273,9 @@ export async function renderAndRecordAnnotatedVideo({
     onProgress?.(progress);
   };
 
-  const renderBlackSegment = async (fromMs, toMs) => {
-    if (toMs <= fromMs) {
-      return toMs;
-    }
-
-    let cursorMs = Math.max(0, fromMs);
-    while (cursorMs < toMs - 0.0001) {
-      drawCompositeFrame(cursorMs, false);
-      cursorMs += frameStepMs;
-      await waitNextFrame();
-    }
-
-    return toMs;
-  };
-
-  let timelineCursorMs = 0;
-
-  for (const clip of timelineClips) {
-    await loadVideoSource(clip.url || videoUrl);
-
-    const clipTimelineStartMs = Math.max(0, Number(clip.timelineStartMs) || 0);
-    const clipTimelineEndMsValue = Math.max(clipTimelineStartMs, Number(clipTimelineEndMs(clip)) || clipTimelineStartMs);
-
-    if (clipTimelineStartMs > timelineCursorMs) {
-      timelineCursorMs = await renderBlackSegment(timelineCursorMs, Math.min(clipTimelineStartMs, durationMs));
-    }
-    if (timelineCursorMs >= durationMs || clipTimelineEndMsValue <= timelineCursorMs) {
-      continue;
-    }
-
-    const clipStartMs = Number(clip.sourceStartMs) || 0;
-    let clipEndMs = Number(clip.sourceEndMs);
-    if (!Number.isFinite(clipEndMs)) {
-      const fallbackDurationMs = Number.isFinite(Number(exportVideo.duration))
-        ? Number(exportVideo.duration) * 1000
-        : clipStartMs;
-      clipEndMs = Math.max(clipStartMs, fallbackDurationMs);
-    }
-    clipEndMs = Math.max(clipStartMs, clipEndMs);
-    const sourceSpanMs = Math.max(0, clipEndMs - clipStartMs);
-    const movingTimelineEndMs = Math.min(clipTimelineEndMsValue, clipTimelineStartMs + sourceSpanMs, durationMs);
-    const startSec = clipStartMs / 1000;
-
-    if (movingTimelineEndMs > timelineCursorMs + 0.0001) {
-      if (Math.abs((exportVideo.currentTime || 0) - startSec) > 0.001) {
-        exportVideo.currentTime = startSec;
-        await waitForEvent(exportVideo, "seeked");
-      }
-
-      await exportVideo.play();
-
-      while (!exportVideo.paused) {
-        const localMs = (exportVideo.currentTime || 0) * 1000;
-        const globalMs = clipTimelineStartMs + (localMs - clipStartMs);
-        const clampedGlobalMs = Math.max(timelineCursorMs, Math.min(globalMs, movingTimelineEndMs));
-
-        drawCompositeFrame(clampedGlobalMs, true);
-
-        timelineCursorMs = Math.max(timelineCursorMs, clampedGlobalMs);
-        if (timelineCursorMs >= movingTimelineEndMs - frameStepMs * 0.25) {
-          break;
-        }
-
-        if (exportVideo.ended || exportVideo.currentTime >= (clipEndMs / 1000) - frameToleranceSeconds) {
-          break;
-        }
-
-        await waitNextFrame();
-      }
-    }
-    exportVideo.pause();
-    timelineCursorMs = Math.max(timelineCursorMs, movingTimelineEndMs);
-
-    const clipRemainderEndMs = Math.min(clipTimelineEndMsValue, durationMs);
-    if (clipRemainderEndMs > timelineCursorMs + 0.0001) {
-      timelineCursorMs = await renderBlackSegment(timelineCursorMs, clipRemainderEndMs);
-    }
-
-    timelineCursorMs = Math.max(timelineCursorMs, clipTimelineEndMsValue);
-  }
-
-  if (timelineCursorMs < durationMs) {
-    await renderBlackSegment(timelineCursorMs, durationMs);
+  for (let cursorMs = 0; cursorMs < durationMs - 0.0001; cursorMs += frameStepMs) {
+    await drawCompositeFrame(cursorMs);
+    await waitNextFrame();
   }
 
   onProgress?.(1);

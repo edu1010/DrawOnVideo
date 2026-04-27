@@ -275,10 +275,12 @@ button.danger {
 .video-layer {
   background: #000;
   object-fit: contain;
+  z-index: 0;
 }
 
 .blend-video-layer {
   pointer-events: none;
+  z-index: 1;
 }
 
 .video-layer.gap-hidden {
@@ -288,6 +290,7 @@ button.danger {
 .draw-layer {
   cursor: crosshair;
   touch-action: none;
+  z-index: 2;
 }
 
 .empty-stage {

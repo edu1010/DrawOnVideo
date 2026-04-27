@@ -262,7 +262,7 @@ function resolveSameLayerCrossfade(clips, activeClip, globalMs) {
   return {
     outgoingClip,
     outgoingOpacity: 1 - progress,
-    activeOpacity: progress
+    activeOpacity: 1
   };
 }
 
@@ -391,6 +391,7 @@ function App() {
   const blendVideoUrlRef = useRef("");
   const blendVideoOpacityRef = useRef(0);
   const mainVideoOpacityRef = useRef(1);
+  const playbackTickLastPerfRef = useRef(null);
   const gapPlaybackRef = useRef(false);
   const gapTickLastPerfRef = useRef(null);
   const currentPressureUiRef = useRef(0);
@@ -795,8 +796,10 @@ function App() {
 
     const tick = () => {
       const video = videoRef.current;
+      const nowPerf = performance.now();
 
       if (pendingVideoSeekRef.current !== null) {
+        playbackTickLastPerfRef.current = nowPerf;
         const timelineNow = Math.max(0, Number(currentTimeRef.current) || 0);
         const frame = Math.round(timelineNow * (videoMetaRef.current.fps || 30));
         const shouldRender =
@@ -812,11 +815,24 @@ function App() {
       } else if (video && videoUrl && !gapPlaybackRef.current) {
         const orderedClips = sortVideoClips(videoClipsRef.current);
         const activeClip = orderedClips.find((clip) => clip.id === currentVideoClipIdRef.current) || null;
+        const videoLocalMs = (Number(video.currentTime) || 0) * 1000;
+        const derivedGlobalMs = activeClip
+          ? (Number(activeClip.timelineStartMs) || 0) + (videoLocalMs - (Number(activeClip.sourceStartMs) || 0))
+          : videoLocalMs;
+        let globalMs = derivedGlobalMs;
 
-        const localMs = (Number(video.currentTime) || 0) * 1000;
-        const globalMs = activeClip
-          ? (Number(activeClip.timelineStartMs) || 0) + (localMs - (Number(activeClip.sourceStartMs) || 0))
-          : localMs;
+        if (isPlaying) {
+          const previousPerf = Number(playbackTickLastPerfRef.current);
+          const elapsedMs = Number.isFinite(previousPerf)
+            ? clamp(nowPerf - previousPerf, 0, 120)
+            : (1000 / Math.max(videoMetaRef.current.fps || 30, 1));
+          playbackTickLastPerfRef.current = nowPerf;
+          const timelineEndMs = resolveTimelineEndMs();
+          globalMs = timelineEndMs > 0
+            ? Math.min(timelineEndMs, playheadMsRef.current + elapsedMs)
+            : playheadMsRef.current + elapsedMs;
+        }
+
         const mediaNow = Math.max(0, globalMs / 1000);
         const timelineNow = isPlaying
           ? mediaNow
@@ -853,38 +869,38 @@ function App() {
           video.volume = 1;
         }
 
-        syncBlendVideo(globalMs, activeClip, isPlaying && !video.paused);
-
-        if (
+        if (isPlaying && !visibleClip) {
+          setPlayheadMs(globalMs);
+          currentVideoClipIdRef.current = null;
+          setCurrentVideoClipId(null);
+          setIsGapPreview(true);
+          gapPlaybackRef.current = true;
+          gapTickLastPerfRef.current = nowPerf;
+          playbackTickLastPerfRef.current = null;
+          hideBlendVideo();
+          video.pause();
+        } else if (
           isPlaying
-          && pendingVideoSeekRef.current === null
-          && activeClip
           && visibleClip
-          && visibleClip.id !== currentVideoClipIdRef.current
+          && (!activeClip || visibleClip.id !== currentVideoClipIdRef.current)
         ) {
           seekGlobalTimeMs(globalMs, { autoplay: true });
-        }
-
-        if (isPlaying && activeClip) {
-          const activeEndMs = Number(activeClip.sourceEndMs) || Number.POSITIVE_INFINITY;
-          const toleranceMs = 1000 / Math.max(videoMetaRef.current.fps || 30, 1);
-          if (localMs >= activeEndMs - toleranceMs) {
-            const timelineEndMs = Math.max(0, (Number(videoMetaRef.current.duration) || 0) * 1000);
-            const nextGlobalMs = Math.min(timelineEndMs, globalMs + toleranceMs * 1.2);
-
-            if (nextGlobalMs > globalMs + 0.1 && nextGlobalMs < timelineEndMs - 0.1) {
-              seekGlobalTimeMs(nextGlobalMs, { autoplay: true });
-            } else {
-              gapPlaybackRef.current = false;
-              gapTickLastPerfRef.current = null;
-              setIsGapPreview(false);
-              video.pause();
-            }
+        } else if (activeClip) {
+          const expectedLocalMs = clipLocalMsAtTimelineMs(
+            activeClip,
+            globalMs,
+            Number.isFinite(Number(video.duration)) ? Number(video.duration) * 1000 : 0
+          );
+          const driftMs = Math.abs(videoLocalMs - expectedLocalMs);
+          if (isPlaying && driftMs > Math.max(80, 1000 / Math.max(videoMetaRef.current.fps || 30, 1) * 3)) {
+            seekVideoElement(video, expectedLocalMs / 1000, { autoplay: true });
           }
+          syncBlendVideo(globalMs, activeClip, isPlaying && !video.paused);
+        } else {
+          hideBlendVideo();
         }
       } else if (isPlaying && (video || videoClipsRef.current.length > 0)) {
         hideBlendVideo();
-        const nowPerf = performance.now();
         const previousPerf = Number(gapTickLastPerfRef.current);
         const elapsedMs = Number.isFinite(previousPerf)
           ? clamp(nowPerf - previousPerf, 0, 120)
@@ -1379,6 +1395,7 @@ function App() {
       if (isPlaying) {
         gapPlaybackRef.current = false;
         gapTickLastPerfRef.current = null;
+        playbackTickLastPerfRef.current = null;
         setIsGapPreview(false);
         video.pause();
         blendVideoRef.current?.pause();
@@ -1394,6 +1411,7 @@ function App() {
             : (Number(currentTimeRef.current) || Number(currentTime) || 0) * 1000
         );
         setPlayheadMs(playFromMs);
+        playbackTickLastPerfRef.current = performance.now();
         seekGlobalTimeMs(playFromMs, { autoplay: true });
       } else {
         video.pause();
@@ -1431,6 +1449,7 @@ function App() {
       const nextGlobalMs = Math.max(0, baseGlobalMs + safeDirection * (1000 / safeFps));
 
       video.pause();
+      playbackTickLastPerfRef.current = null;
       setIsPlaying(false);
       seekGlobalTimeMs(nextGlobalMs, { autoplay: false });
     },
@@ -1939,6 +1958,7 @@ function App() {
       const recordingBytes = await renderAndRecordAnnotatedVideo({
         videoUrl,
         videoClips: videoClipsRef.current,
+        videoLayers: videoLayersRef.current,
         layers: layersRef.current,
         videoMeta: {
           ...videoMetaRef.current,
@@ -2071,9 +2091,13 @@ function App() {
                   className={`video-layer ${isGapPreview ? "gap-hidden" : ""}`}
                   src={videoUrl}
                   style={{ opacity: isGapPreview ? 0 : mainVideoOpacity }}
-                  onPlay={() => setIsPlaying(true)}
+                  onPlay={() => {
+                    playbackTickLastPerfRef.current = performance.now();
+                    setIsPlaying(true);
+                  }}
                   onPause={() => {
                     if (!gapPlaybackRef.current) {
+                      playbackTickLastPerfRef.current = null;
                       setIsPlaying(false);
                     }
                   }}
