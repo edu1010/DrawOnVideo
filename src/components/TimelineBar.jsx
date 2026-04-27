@@ -45,7 +45,14 @@ function waitForEvent(target, eventName) {
   });
 }
 
-async function buildThumbnails({ videoUrl, durationSeconds, fps, targetCount }) {
+async function buildThumbnails({
+  videoUrl,
+  sourceStartSeconds = 0,
+  sourceEndSeconds = null,
+  timelineDurationSeconds = null,
+  fps,
+  targetCount
+}) {
   const video = document.createElement("video");
   video.src = videoUrl;
   video.muted = true;
@@ -56,6 +63,34 @@ async function buildThumbnails({ videoUrl, durationSeconds, fps, targetCount }) 
     await waitForEvent(video, "loadedmetadata");
   }
 
+  const actualDurationSeconds = Number.isFinite(Number(video.duration))
+    ? Number(video.duration)
+    : 0;
+
+  const frameStep = 1 / Math.max(fps || 30, 1);
+  const maxSeekSeconds = Math.max(0, actualDurationSeconds - frameStep);
+
+  const safeSourceStart = clamp(
+    Number(sourceStartSeconds) || 0,
+    0,
+    maxSeekSeconds
+  );
+
+  const rawSourceEnd = Number.isFinite(Number(sourceEndSeconds))
+    ? Number(sourceEndSeconds)
+    : actualDurationSeconds;
+
+  const safeSourceEnd = clamp(
+    rawSourceEnd,
+    safeSourceStart,
+    actualDurationSeconds
+  );
+
+  const sourceSegmentSeconds = Math.max(0, safeSourceEnd - safeSourceStart);
+  const safeTimelineDurationSeconds = Number(timelineDurationSeconds) > 0
+    ? Number(timelineDurationSeconds)
+    : sourceSegmentSeconds;
+
   const sourceWidth = Math.max(1, Number(video.videoWidth) || 320);
   const sourceHeight = Math.max(1, Number(video.videoHeight) || 180);
 
@@ -65,21 +100,20 @@ async function buildThumbnails({ videoUrl, durationSeconds, fps, targetCount }) 
   const canvas = document.createElement("canvas");
   canvas.width = thumbWidth;
   canvas.height = thumbHeight;
+
   const ctx = canvas.getContext("2d", { alpha: false });
 
   if (!ctx) {
     throw new Error("Could not create thumbnail context.");
   }
 
-  const times = Array.from({ length: targetCount + 1 }, (_, index) => {
-    return (durationSeconds * index) / targetCount;
-  });
-
+  const safeTargetCount = Math.max(1, Number(targetCount) || 1);
   const thumbnails = [];
 
-  for (const rawTime of times) {
-    const maxTime = Math.max(0, durationSeconds - 1 / Math.max(fps || 30, 1));
-    const seekTime = clamp(rawTime, 0, maxTime);
+  for (let index = 0; index < safeTargetCount; index += 1) {
+    const progress = index / safeTargetCount;
+    const sourceTime = safeSourceStart + sourceSegmentSeconds * progress;
+    const seekTime = clamp(sourceTime, 0, maxSeekSeconds);
 
     if (Math.abs((video.currentTime || 0) - seekTime) > 0.001) {
       video.currentTime = seekTime;
@@ -87,15 +121,18 @@ async function buildThumbnails({ videoUrl, durationSeconds, fps, targetCount }) 
     }
 
     ctx.drawImage(video, 0, 0, thumbWidth, thumbHeight);
+
     thumbnails.push({
-      time: seekTime,
+      offsetMs: progress * safeTimelineDurationSeconds * 1000,
       dataUrl: canvas.toDataURL("image/jpeg", 0.62)
     });
   }
 
+  video.removeAttribute("src");
+  video.load();
+
   return thumbnails;
 }
-
 function clampDb(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) {
@@ -181,7 +218,7 @@ async function decodeSourceWavePeaks(videoSourceUrl, targetSamples = 1024) {
 
     return peaks;
   } finally {
-    await context.close().catch(() => {});
+    await context.close().catch(() => { });
   }
 }
 
@@ -221,7 +258,7 @@ function TimelineBar({
   const [pixelsPerSecond, setPixelsPerSecond] = useState(95);
   const [trackHeight, setTrackHeight] = useState(56);
   const [timelineTool, setTimelineTool] = useState("move");
-  const [thumbnails, setThumbnails] = useState([]);
+  const [clipThumbnailsById, setClipThumbnailsById] = useState({});
   const [thumbState, setThumbState] = useState("idle");
   const [audioPeaksByUrl, setAudioPeaksByUrl] = useState({});
 
@@ -300,28 +337,54 @@ function TimelineBar({
   useEffect(() => {
     let cancelled = false;
 
-    if (!videoUrl || durationSafe <= 0) {
-      setThumbnails([]);
+    const clips = (videoClips || []).filter((clip) => clip.url);
+
+    if (clips.length === 0) {
+      setClipThumbnailsById({});
       setThumbState("idle");
+
       return () => {
         cancelled = true;
       };
     }
 
-    const targetCount = Math.min(32, Math.max(8, Math.round(durationSafe / 5)));
     setThumbState("loading");
 
-    buildThumbnails({
-      videoUrl,
-      durationSeconds: durationSafe,
-      fps,
-      targetCount
-    })
-      .then((items) => {
-        if (!cancelled) {
-          setThumbnails(items);
-          setThumbState("ready");
+    Promise.all(
+      clips.map(async (clip) => {
+        const timelineStartMs = Number(clip.timelineStartMs) || 0;
+        const timelineEndMs = Number(clipTimelineEndMs(clip)) || timelineStartMs;
+        const timelineDurationMs = Math.max(0, timelineEndMs - timelineStartMs);
+
+        const sourceStartMs = Number(clip.sourceStartMs) || 0;
+        const sourceEndMs = Number.isFinite(Number(clip.sourceEndMs))
+          ? Number(clip.sourceEndMs)
+          : Math.max(sourceStartMs, Number(clip.sourceDurationMs) || timelineDurationMs);
+
+        const targetCount = Math.min(
+          12,
+          Math.max(2, Math.round((timelineDurationMs / 1000) / 4))
+        );
+
+        const items = await buildThumbnails({
+          videoUrl: clip.url,
+          sourceStartSeconds: sourceStartMs / 1000,
+          sourceEndSeconds: sourceEndMs / 1000,
+          timelineDurationSeconds: timelineDurationMs / 1000,
+          fps: Number(clip.fps) || fps,
+          targetCount
+        });
+
+        return [clip.id, items];
+      })
+    )
+      .then((entries) => {
+        if (cancelled) {
+          return;
         }
+
+        setClipThumbnailsById(Object.fromEntries(entries));
+        setThumbState("ready");
       })
       .catch(() => {
         if (!cancelled) {
@@ -332,7 +395,7 @@ function TimelineBar({
     return () => {
       cancelled = true;
     };
-  }, [durationSafe, fps, videoUrl]);
+  }, [fps, videoClips]);
 
   useEffect(() => {
     let cancelled = false;
@@ -394,18 +457,35 @@ function TimelineBar({
     return trackElement.getAttribute("data-layer-id");
   }
 
-  function renderTrackThumbnails(trackKey) {
-    return thumbnails.map((item, index) => {
-      const next = thumbnails[index + 1];
-      const startX = item.time * pixelsPerSecond;
-      const endX = (next ? next.time : timelineSpanSec) * pixelsPerSecond;
-      const width = Math.max(28, endX - startX);
+  function renderClipThumbnails(clip) {
+    const items = clipThumbnailsById[clip.id] || [];
+
+    if (items.length === 0) {
+      return null;
+    }
+
+    const timelineStartMs = Number(clip.timelineStartMs) || 0;
+    const timelineEndMs = Number(clipTimelineEndMs(clip)) || timelineStartMs;
+    const timelineDurationMs = Math.max(1, timelineEndMs - timelineStartMs);
+
+    return items.map((item, index) => {
+      const next = items[index + 1];
+      const startOffsetMs = Number(item.offsetMs) || 0;
+      const endOffsetMs = next
+        ? Number(next.offsetMs) || timelineDurationMs
+        : timelineDurationMs;
+
+      const left = ((timelineStartMs + startOffsetMs) / 1000) * pixelsPerSecond;
+      const width = Math.max(
+        28,
+        ((endOffsetMs - startOffsetMs) / 1000) * pixelsPerSecond
+      );
 
       return (
         <div
           className="timeline-track-thumb-item"
-          key={`${trackKey}-thumb-${index}-${item.time}`}
-          style={{ left: `${startX}px`, width: `${width}px` }}
+          key={`${clip.id}-thumb-${index}`}
+          style={{ left: `${left}px`, width: `${width}px` }}
         >
           <img src={item.dataUrl} alt="" aria-hidden />
         </div>
@@ -706,35 +786,62 @@ function TimelineBar({
                 data-layer-id={videoLayer.id}
                 style={{ height: `${trackHeight}px` }}
               >
-                {(videoLayerClipsById.get(videoLayer.id)?.length || 0) > 0
-                  ? renderTrackThumbnails(`video-${videoLayer.id}`)
-                  : null}
+                {(videoLayerClipsById.get(videoLayer.id) || []).map((clip) =>
+                  renderClipThumbnails(clip)
+                )}
                 {(videoLayerClipsById.get(videoLayer.id) || []).map((clip, index) => {
-                    const startSec = (Number(clip.timelineStartMs) || 0) / 1000;
-                    const endSec = (Number(clipTimelineEndMs(clip)) || 0) / 1000;
+                  const startSec = (Number(clip.timelineStartMs) || 0) / 1000;
+                  const endSec = (Number(clipTimelineEndMs(clip)) || 0) / 1000;
 
-                    if (!Number.isFinite(endSec) || endSec <= 0 || startSec >= timelineSpanSec) {
-                      return null;
-                    }
+                  if (!Number.isFinite(endSec) || endSec <= 0 || startSec >= timelineSpanSec) {
+                    return null;
+                  }
 
-                    const safeStart = clamp(startSec, 0, timelineSpanSec);
-                    const safeEnd = clamp(endSec, 0, timelineSpanSec);
-                    const left = safeStart * pixelsPerSecond;
-                    const width = Math.max(14, (safeEnd - safeStart) * pixelsPerSecond);
-                    const isSelected = selectedVideoIds.has(clip.id);
-                    const clipWavePeaks = clipWavePeaksFromSource({
-                      sourcePeaks: audioPeaksByUrl[clip.url],
-                      sourceDurationMs: clip.sourceDurationMs,
-                      sourceStartMs: clip.sourceStartMs,
-                      sourceEndMs: clip.sourceEndMs,
-                      targetBars: Math.max(12, Math.min(56, Math.round(width / 6)))
-                    });
+                  const safeStart = clamp(startSec, 0, timelineSpanSec);
+                  const safeEnd = clamp(endSec, 0, timelineSpanSec);
+                  const left = safeStart * pixelsPerSecond;
+                  const width = Math.max(14, (safeEnd - safeStart) * pixelsPerSecond);
+                  const isSelected = selectedVideoIds.has(clip.id);
+                  const clipWavePeaks = clipWavePeaksFromSource({
+                    sourcePeaks: audioPeaksByUrl[clip.url],
+                    sourceDurationMs: clip.sourceDurationMs,
+                    sourceStartMs: clip.sourceStartMs,
+                    sourceEndMs: clip.sourceEndMs,
+                    targetBars: Math.max(12, Math.min(56, Math.round(width / 6)))
+                  });
 
-                    return (
+                  return (
+                    <div
+                      className={`timeline-clip timeline-video-clip ${isSelected ? "selected" : ""}`}
+                      key={clip.id}
+                      style={{ left: `${left}px`, width: `${width}px` }}
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                        onSelectVideoLayer?.(clip.videoLayerId || videoLayer.id);
+                        onSelectVideoClip?.(
+                          clip.id,
+                          { additive: event.shiftKey, toggle: event.shiftKey }
+                        );
+
+                        if (timelineTool === "cut") {
+                          const cutSeconds = clientXToTimelineSeconds(event.clientX);
+                          onSplitVideoClip?.(clip.id, cutSeconds * 1000);
+                          return;
+                        }
+
+                        beginDrag(event, {
+                          kind: "video",
+                          mode: "move",
+                          targetId: clip.id,
+                          windowMs: {
+                            clipStartMs: Number(clip.timelineStartMs) || 0,
+                            clipEndMs: Number(clipTimelineEndMs(clip)) || 0
+                          }
+                        });
+                      }}
+                    >
                       <div
-                        className={`timeline-clip timeline-video-clip ${isSelected ? "selected" : ""}`}
-                        key={clip.id}
-                        style={{ left: `${left}px`, width: `${width}px` }}
+                        className="clip-handle left"
                         onPointerDown={(event) => {
                           event.stopPropagation();
                           onSelectVideoLayer?.(clip.videoLayerId || videoLayer.id);
@@ -742,16 +849,9 @@ function TimelineBar({
                             clip.id,
                             { additive: event.shiftKey, toggle: event.shiftKey }
                           );
-
-                          if (timelineTool === "cut") {
-                            const cutSeconds = clientXToTimelineSeconds(event.clientX);
-                            onSplitVideoClip?.(clip.id, cutSeconds * 1000);
-                            return;
-                          }
-
                           beginDrag(event, {
                             kind: "video",
-                            mode: "move",
+                            mode: "trimStart",
                             targetId: clip.id,
                             windowMs: {
                               clipStartMs: Number(clip.timelineStartMs) || 0,
@@ -759,82 +859,61 @@ function TimelineBar({
                             }
                           });
                         }}
+                      />
+
+                      {clipWavePeaks.length > 0 ? (
+                        <div className="video-clip-wave" aria-hidden>
+                          {clipWavePeaks.map((peak, peakIndex) => (
+                            <span
+                              key={`${clip.id}-peak-${peakIndex}`}
+                              style={{ height: `${Math.max(12, Math.round((Number(peak) || 0) * 100))}%` }}
+                            />
+                          ))}
+                        </div>
+                      ) : null}
+
+                      <button
+                        className={`video-clip-audio-badge ${clip.audioMuted ? "muted" : ""}`}
+                        title={clip.audioMuted ? "Unmute clip" : "Mute clip"}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onUpdateVideoClipAudio?.(clip.id, { audioMuted: !clip.audioMuted });
+                        }}
                       >
-                        <div
-                          className="clip-handle left"
-                          onPointerDown={(event) => {
-                            event.stopPropagation();
-                            onSelectVideoLayer?.(clip.videoLayerId || videoLayer.id);
-                            onSelectVideoClip?.(
-                              clip.id,
-                              { additive: event.shiftKey, toggle: event.shiftKey }
-                            );
-                            beginDrag(event, {
-                              kind: "video",
-                              mode: "trimStart",
-                              targetId: clip.id,
-                              windowMs: {
-                                clipStartMs: Number(clip.timelineStartMs) || 0,
-                                clipEndMs: Number(clipTimelineEndMs(clip)) || 0
-                              }
-                            });
-                          }}
-                        />
+                        {clip.audioMuted ? "M" : "A"}
+                      </button>
 
-                        {clipWavePeaks.length > 0 ? (
-                          <div className="video-clip-wave" aria-hidden>
-                            {clipWavePeaks.map((peak, peakIndex) => (
-                              <span
-                                key={`${clip.id}-peak-${peakIndex}`}
-                                style={{ height: `${Math.max(12, Math.round((Number(peak) || 0) * 100))}%` }}
-                              />
-                            ))}
-                          </div>
-                        ) : null}
+                      <span className="clip-title">{clip.name || `Video ${index + 1}`}</span>
 
-                        <button
-                          className={`video-clip-audio-badge ${clip.audioMuted ? "muted" : ""}`}
-                          title={clip.audioMuted ? "Unmute clip" : "Mute clip"}
-                          onPointerDown={(event) => event.stopPropagation()}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onUpdateVideoClipAudio?.(clip.id, { audioMuted: !clip.audioMuted });
-                          }}
-                        >
-                          {clip.audioMuted ? "M" : "A"}
-                        </button>
-
-                        <span className="clip-title">{clip.name || `Video ${index + 1}`}</span>
-
-                        <div
-                          className="clip-handle right"
-                          onPointerDown={(event) => {
-                            event.stopPropagation();
-                            onSelectVideoLayer?.(clip.videoLayerId || videoLayer.id);
-                            onSelectVideoClip?.(
-                              clip.id,
-                              { additive: event.shiftKey, toggle: event.shiftKey }
-                            );
-                            beginDrag(event, {
-                              kind: "video",
-                              mode: "trimEnd",
-                              targetId: clip.id,
-                              windowMs: {
-                                clipStartMs: Number(clip.timelineStartMs) || 0,
-                                clipEndMs: Number(clipTimelineEndMs(clip)) || 0
-                              }
-                            });
-                          }}
-                        />
-                      </div>
-                    );
-                  })}
+                      <div
+                        className="clip-handle right"
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                          onSelectVideoLayer?.(clip.videoLayerId || videoLayer.id);
+                          onSelectVideoClip?.(
+                            clip.id,
+                            { additive: event.shiftKey, toggle: event.shiftKey }
+                          );
+                          beginDrag(event, {
+                            kind: "video",
+                            mode: "trimEnd",
+                            targetId: clip.id,
+                            windowMs: {
+                              clipStartMs: Number(clip.timelineStartMs) || 0,
+                              clipEndMs: Number(clipTimelineEndMs(clip)) || 0
+                            }
+                          });
+                        }}
+                      />
+                    </div>
+                  );
+                })}
               </div>
             ))}
 
             {layers.map((layer) => (
               <div className="timeline-track timeline-track-with-thumbs" key={`track-${layer.id}`} style={{ height: `${trackHeight}px` }}>
-                {(layer.strokes || []).length > 0 ? renderTrackThumbnails(`draw-${layer.id}`) : null}
                 {(layer.strokes || []).map((stroke, index) => {
                   const windowMs = strokeClipWindowMs(stroke, fps, Number.POSITIVE_INFINITY);
                   const clipStartSec = windowMs.clipStartMs / 1000;

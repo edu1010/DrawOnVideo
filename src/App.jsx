@@ -280,9 +280,49 @@ function annotationTimelineDurationMs(layers, fps = 30) {
   return maxEnd;
 }
 
+function playVideoWhenReady(video) {
+  if (!video) {
+    return;
+  }
+
+  let requested = false;
+
+  const requestPlay = () => {
+    if (requested) {
+      return;
+    }
+
+    requested = true;
+    video.removeEventListener("loadeddata", requestPlay);
+    video.removeEventListener("canplay", requestPlay);
+
+    video.play().catch(() => { });
+  };
+
+  // 2 = HAVE_CURRENT_DATA
+  if (video.readyState >= 2) {
+    requestPlay();
+    return;
+  }
+
+  video.addEventListener("loadeddata", requestPlay, { once: true });
+  video.addEventListener("canplay", requestPlay, { once: true });
+}
+
 function seekVideoElement(video, targetSeconds, options = {}) {
   const { autoplay = false, onSettled = null } = options;
-  const desiredSeconds = Math.max(0, Number(targetSeconds) || 0);
+
+  const durationSeconds = Number(video.duration);
+  const maxSeekSeconds = Number.isFinite(durationSeconds) && durationSeconds > 0
+    ? Math.max(0, durationSeconds - 1 / 240)
+    : Number.POSITIVE_INFINITY;
+
+  const desiredSeconds = clamp(
+    Math.max(0, Number(targetSeconds) || 0),
+    0,
+    maxSeekSeconds
+  );
+
   const currentSeconds = Math.max(0, Number(video.currentTime) || 0);
   const epsilon = 1 / 240;
 
@@ -290,8 +330,9 @@ function seekVideoElement(video, targetSeconds, options = {}) {
     if (typeof onSettled === "function") {
       onSettled();
     }
+
     if (autoplay) {
-      video.play().catch(() => {});
+      playVideoWhenReady(video);
     }
   };
 
@@ -307,11 +348,14 @@ function seekVideoElement(video, targetSeconds, options = {}) {
     if (settled) {
       return;
     }
+
     settled = true;
     video.removeEventListener("seeked", onSeeked);
+
     if (fallbackId !== null) {
       window.clearTimeout(fallbackId);
     }
+
     finish();
   };
 
@@ -320,10 +364,16 @@ function seekVideoElement(video, targetSeconds, options = {}) {
   };
 
   video.addEventListener("seeked", onSeeked, { once: true });
+
   fallbackId = window.setTimeout(() => {
     cleanup();
-  }, 180);
-  video.currentTime = desiredSeconds;
+  }, 250);
+
+  try {
+    video.currentTime = desiredSeconds;
+  } catch {
+    cleanup();
+  }
 }
 
 function playAfterSeek(video, targetSeconds, options = {}) {
@@ -394,6 +444,8 @@ function App() {
   const playbackTickLastPerfRef = useRef(null);
   const gapPlaybackRef = useRef(false);
   const gapTickLastPerfRef = useRef(null);
+  const isPlayingRef = useRef(false);
+  const justResumedRef = useRef(false);
   const currentPressureUiRef = useRef(0);
   const pressureUiUpdatedAtRef = useRef(0);
 
@@ -506,7 +558,7 @@ function App() {
 
     clearPendingBlendSeek();
     if (shouldPlay && blendVideo.paused) {
-      blendVideo.play().catch(() => {});
+      blendVideo.play().catch(() => { });
     } else if (!shouldPlay && !blendVideo.paused) {
       blendVideo.pause();
     }
@@ -555,6 +607,10 @@ function App() {
     onionSkinRef.current = onionSkin;
     dirtyRef.current = true;
   }, [onionSkin]);
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -822,15 +878,16 @@ function App() {
         let globalMs = derivedGlobalMs;
 
         if (isPlaying) {
-          const previousPerf = Number(playbackTickLastPerfRef.current);
-          const elapsedMs = Number.isFinite(previousPerf)
-            ? clamp(nowPerf - previousPerf, 0, 120)
-            : (1000 / Math.max(videoMetaRef.current.fps || 30, 1));
+          if (justResumedRef.current) {
+            justResumedRef.current = false;
+          }
+
           playbackTickLastPerfRef.current = nowPerf;
+
           const timelineEndMs = resolveTimelineEndMs();
           globalMs = timelineEndMs > 0
-            ? Math.min(timelineEndMs, playheadMsRef.current + elapsedMs)
-            : playheadMsRef.current + elapsedMs;
+            ? Math.min(timelineEndMs, derivedGlobalMs)
+            : derivedGlobalMs;
         }
 
         const mediaNow = Math.max(0, globalMs / 1000);
@@ -886,15 +943,7 @@ function App() {
         ) {
           seekGlobalTimeMs(globalMs, { autoplay: true });
         } else if (activeClip) {
-          const expectedLocalMs = clipLocalMsAtTimelineMs(
-            activeClip,
-            globalMs,
-            Number.isFinite(Number(video.duration)) ? Number(video.duration) * 1000 : 0
-          );
-          const driftMs = Math.abs(videoLocalMs - expectedLocalMs);
-          if (isPlaying && driftMs > Math.max(80, 1000 / Math.max(videoMetaRef.current.fps || 30, 1) * 3)) {
-            seekVideoElement(video, expectedLocalMs / 1000, { autoplay: true });
-          }
+
           syncBlendVideo(globalMs, activeClip, isPlaying && !video.paused);
         } else {
           hideBlendVideo();
@@ -1290,13 +1339,23 @@ function App() {
         height: Number(probedMeta?.height) || videoMetaRef.current.height || DEFAULT_VIDEO_META.height
       });
 
-      setVideoClips((prev) => [...prev, clip]);
+      const wasPlaying = isPlayingRef.current;
+      const syncMs = Math.max(0, playheadMsRef.current);
+
+      const nextClips = [...videoClipsRef.current, clip];
+
+      videoClipsRef.current = nextClips;
+      setVideoClips(nextClips);
+
+      window.requestAnimationFrame(() => {
+        seekGlobalTimeMs(syncMs, { autoplay: wasPlaying });
+      });
+
       setStatus(`Video added: ${selected}`);
     } catch (error) {
       setStatus(`Failed to add video: ${error.message}`);
     }
-  }, []);
-
+  }, [seekGlobalTimeMs]);
   const handleLoadProject = useCallback(async () => {
     if (!desktopAPI) {
       return;
@@ -1391,35 +1450,39 @@ function App() {
       return;
     }
 
+    const playing = isPlayingRef.current;
+
     try {
-      if (isPlaying) {
+      if (playing) {
         gapPlaybackRef.current = false;
         gapTickLastPerfRef.current = null;
         playbackTickLastPerfRef.current = null;
+        justResumedRef.current = false;
         setIsGapPreview(false);
         video.pause();
         blendVideoRef.current?.pause();
+        isPlayingRef.current = false;
         setIsPlaying(false);
         return;
       }
 
-      if (video.paused) {
-        const playFromMs = Math.max(
-          0,
-          Number.isFinite(Number(playheadMsRef.current))
-            ? Number(playheadMsRef.current)
-            : (Number(currentTimeRef.current) || Number(currentTime) || 0) * 1000
-        );
-        setPlayheadMs(playFromMs);
-        playbackTickLastPerfRef.current = performance.now();
-        seekGlobalTimeMs(playFromMs, { autoplay: true });
-      } else {
-        video.pause();
-      }
+      // Mark that we just resumed so the tick loop anchors to the real video
+      // position on the first frame instead of jumping ahead.
+      justResumedRef.current = true;
+
+      const playFromMs = Math.max(
+        0,
+        Number.isFinite(Number(playheadMsRef.current))
+          ? Number(playheadMsRef.current)
+          : (Number(currentTimeRef.current) || 0) * 1000
+      );
+      setPlayheadMs(playFromMs);
+      playbackTickLastPerfRef.current = performance.now();
+      seekGlobalTimeMs(playFromMs, { autoplay: true });
     } catch (error) {
       setStatus(`Playback error: ${error.message}`);
     }
-  }, [currentTime, isPlaying, seekGlobalTimeMs, setPlayheadMs]);
+  }, [seekGlobalTimeMs, setPlayheadMs]);
 
   const handleSeek = useCallback((nextTime) => {
     if (videoClipsRef.current.length === 0) {
@@ -1684,8 +1747,44 @@ function App() {
   }, []);
 
   const handleSplitVideoClip = useCallback((clipId, cutMs) => {
-    setVideoClips((prev) => splitVideoClip(prev, clipId, Number(cutMs)));
-  }, []);
+    const wasPlaying = isPlayingRef.current;
+    const safeCutMs = Math.max(
+      0,
+      Number.isFinite(Number(cutMs))
+        ? Number(cutMs)
+        : playheadMsRef.current
+    );
+
+    const nextClips = splitVideoClip(
+      videoClipsRef.current,
+      clipId,
+      safeCutMs
+    );
+
+    videoClipsRef.current = nextClips;
+    setVideoClips(nextClips);
+
+    const clipAtCut = findVideoClipAtTime(nextClips, safeCutMs, {
+      preferredLayerId: activeVideoLayerIdRef.current,
+      layerOrderIds: (videoLayersRef.current || []).map((layer) => layer.id)
+    });
+
+    currentVideoClipIdRef.current = clipAtCut?.id || null;
+    setCurrentVideoClipId(clipAtCut?.id || null);
+    setSelectedVideoClipIds(clipAtCut ? [clipAtCut.id] : []);
+
+    if (clipAtCut?.path) {
+      setVideoPath(clipAtCut.path);
+    }
+
+    if (clipAtCut?.url && clipAtCut.url !== videoUrl) {
+      setVideoUrl(clipAtCut.url);
+    }
+
+    window.requestAnimationFrame(() => {
+      seekGlobalTimeMs(safeCutMs, { autoplay: wasPlaying });
+    });
+  }, [seekGlobalTimeMs, videoUrl]);
 
   const handleMoveClip = useCallback((layerId, strokeId, nextWindow) => {
     const durationMs = Number.POSITIVE_INFINITY;
@@ -1806,12 +1905,22 @@ function App() {
 
     const exists = ordered.some((clip) => clip.id === activeClipId);
     if (!exists) {
-      const first = ordered[0];
-      currentVideoClipIdRef.current = first.id;
-      setCurrentVideoClipId(first.id);
-      setVideoUrl(first.url);
-      setVideoPath(first.path);
-      seekGlobalTimeMs(first.timelineStartMs || 0, { autoplay: false });
+      // The active clip was removed (e.g. after a split). Find the clip at
+      // the current playhead so we don't jump back to the start.
+      const globalMs = Math.max(0, playheadMsRef.current);
+      const clipAtPlayhead = findVideoClipAtTime(ordered, globalMs, {
+        preferredLayerId: activeVideoLayerIdRef.current,
+        layerOrderIds: (videoLayersRef.current || []).map((l) => l.id)
+      });
+      const fallback = clipAtPlayhead || ordered[0];
+      currentVideoClipIdRef.current = fallback.id;
+      setCurrentVideoClipId(fallback.id);
+      if (fallback.url !== videoUrl) {
+        setVideoUrl(fallback.url);
+      }
+      setVideoPath(fallback.path);
+      const seekMs = clipAtPlayhead ? globalMs : (fallback.timelineStartMs || 0);
+      seekGlobalTimeMs(seekMs, { autoplay: false });
     }
   }, [seekGlobalTimeMs, setPlayheadMs, videoClips]);
 
@@ -2093,11 +2202,13 @@ function App() {
                   style={{ opacity: isGapPreview ? 0 : mainVideoOpacity }}
                   onPlay={() => {
                     playbackTickLastPerfRef.current = performance.now();
+                    isPlayingRef.current = true;
                     setIsPlaying(true);
                   }}
                   onPause={() => {
                     if (!gapPlaybackRef.current) {
                       playbackTickLastPerfRef.current = null;
+                      isPlayingRef.current = false;
                       setIsPlaying(false);
                     }
                   }}
