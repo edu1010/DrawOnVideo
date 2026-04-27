@@ -33,6 +33,18 @@ function pickRecorderMimeType() {
   return options.find((item) => MediaRecorder.isTypeSupported(item)) || "video/webm";
 }
 
+function drawVideoContain(ctx, video, width, height) {
+  const sourceWidth = Number(video.videoWidth) || width;
+  const sourceHeight = Number(video.videoHeight) || height;
+  const scale = Math.min(width / sourceWidth, height / sourceHeight);
+  const drawWidth = sourceWidth * scale;
+  const drawHeight = sourceHeight * scale;
+  const left = (width - drawWidth) / 2;
+  const top = (height - drawHeight) / 2;
+
+  ctx.drawImage(video, left, top, drawWidth, drawHeight);
+}
+
 export async function renderAndRecordAnnotatedVideo({
   videoUrl,
   videoClips,
@@ -124,7 +136,7 @@ export async function renderAndRecordAnnotatedVideo({
 
   const waitNextFrame = () =>
     new Promise((resolve) => {
-      requestAnimationFrame(resolve);
+      window.setTimeout(resolve, frameStepMs);
     });
 
   recorder.start(250);
@@ -136,7 +148,7 @@ export async function renderAndRecordAnnotatedVideo({
     exportCtx.fillRect(0, 0, width, height);
 
     if (drawVideo) {
-      exportCtx.drawImage(exportVideo, 0, 0, width, height);
+      drawVideoContain(exportCtx, exportVideo, width, height);
     }
 
     renderAnnotationOverlay({
@@ -229,19 +241,9 @@ export async function renderAndRecordAnnotatedVideo({
     exportVideo.pause();
     timelineCursorMs = Math.max(timelineCursorMs, movingTimelineEndMs);
 
-    const freezeSegmentEndMs = Math.min(clipTimelineEndMsValue, durationMs);
-    if (freezeSegmentEndMs > timelineCursorMs + 0.0001) {
-      const freezeSec = clipEndMs / 1000;
-      if (Math.abs((exportVideo.currentTime || 0) - freezeSec) > 0.001) {
-        exportVideo.currentTime = freezeSec;
-        await waitForEvent(exportVideo, "seeked");
-      }
-
-      while (timelineCursorMs < freezeSegmentEndMs - 0.0001) {
-        drawCompositeFrame(timelineCursorMs, true);
-        timelineCursorMs += frameStepMs;
-        await waitNextFrame();
-      }
+    const clipRemainderEndMs = Math.min(clipTimelineEndMsValue, durationMs);
+    if (clipRemainderEndMs > timelineCursorMs + 0.0001) {
+      timelineCursorMs = await renderBlackSegment(timelineCursorMs, clipRemainderEndMs);
     }
 
     timelineCursorMs = Math.max(timelineCursorMs, clipTimelineEndMsValue);

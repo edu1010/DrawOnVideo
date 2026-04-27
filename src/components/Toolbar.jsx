@@ -3,6 +3,7 @@ import { PRESSURE_PRESETS, TOOL_BRUSH, TOOL_ERASER } from "../constants";
 function Toolbar({
   brush,
   currentPressure,
+  currentPressureInput,
   onionSkin,
   onBrushChange,
   onSetOnionSkin,
@@ -11,6 +12,16 @@ function Toolbar({
   onClearLayer,
   canDraw
 }) {
+  const safePressure = Math.max(0, Math.min(1, Number(currentPressure) || 0));
+  const rawPressure = Number(currentPressureInput?.rawPressure);
+  const rawPressureLabel = Number.isFinite(rawPressure)
+    ? rawPressure.toFixed(rawPressure > 1 ? 0 : 3)
+    : "--";
+  const pointerLabel = currentPressureInput?.pointerType || "unknown";
+  const sourceLabel = currentPressureInput?.hasHardwarePressure
+    ? currentPressureInput.source
+    : "no real pressure";
+
   return (
     <aside className="toolbar-panel">
       <h2>Tools</h2>
@@ -91,7 +102,10 @@ function Toolbar({
           <div className="control-group">
             <label>Current Pressure</label>
             <div className="pressure-live-value">
-              {(Math.max(0, Math.min(1, Number(currentPressure) || 0)) * 100).toFixed(0)}%
+              {(safePressure * 100).toFixed(1)}%
+              <span>
+                Input: {pointerLabel} | Raw: {rawPressureLabel} | Source: {sourceLabel}
+              </span>
             </div>
           </div>
 

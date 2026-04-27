@@ -212,6 +212,15 @@ button.danger {
   letter-spacing: 0.02em;
 }
 
+.pressure-live-value span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
 .tool-row {
   display: flex;
   gap: 8px;

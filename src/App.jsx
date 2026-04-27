@@ -64,30 +64,45 @@ function fileNameFromPath(filePath) {
   return parts[parts.length - 1] || filePath;
 }
 
-function extractHardwarePressure(pointerEvent) {
+function readPointerPressureInfo(pointerEvent) {
   const samples = typeof pointerEvent.getCoalescedEvents === "function"
     ? pointerEvent.getCoalescedEvents()
     : [];
   const candidates = [...samples, pointerEvent];
+  const pointerType = pointerEvent.pointerType || "unknown";
+  const rawPressure = Number(pointerEvent.pressure);
+  let hardwarePressure = null;
+  let source = "none";
 
   for (let index = candidates.length - 1; index >= 0; index -= 1) {
     const candidate = candidates[index];
     const directPressure = Number(candidate.pressure);
     if (Number.isFinite(directPressure) && directPressure > 0) {
+      const normalizedPressure = directPressure > 1 ? directPressure / 8191 : directPressure;
       // Mouse pointers usually report 0.5 while pressed, which is not real pressure data.
-      if (pointerEvent.pointerType === "mouse" && Math.abs(directPressure - 0.5) < 0.0001) {
+      if (pointerType === "mouse" && Math.abs(normalizedPressure - 0.5) < 0.0001) {
         continue;
       }
-      return clamp(directPressure > 1 ? directPressure / 8191 : directPressure, 0.05, 1);
+      hardwarePressure = clamp(normalizedPressure, 0.05, 1);
+      source = candidate === pointerEvent ? "event.pressure" : "coalesced.pressure";
+      break;
     }
   }
 
   const fallbackForce = Number(pointerEvent.force ?? pointerEvent.webkitForce);
-  if (Number.isFinite(fallbackForce) && fallbackForce > 0) {
-    return clamp(fallbackForce, 0.05, 1);
+  if (hardwarePressure === null && Number.isFinite(fallbackForce) && fallbackForce > 0) {
+    hardwarePressure = clamp(fallbackForce, 0.05, 1);
+    source = "force";
   }
 
-  return null;
+  return {
+    pointerType,
+    rawPressure: Number.isFinite(rawPressure) ? rawPressure : null,
+    hardwarePressure,
+    source,
+    sampleCount: candidates.length,
+    hasHardwarePressure: hardwarePressure !== null
+  };
 }
 
 function normalizePressure(pointerEvent, pressureEnabled, options = {}) {
@@ -95,7 +110,8 @@ function normalizePressure(pointerEvent, pressureEnabled, options = {}) {
     return 1;
   }
 
-  const hardwarePressure = extractHardwarePressure(pointerEvent);
+  const pressureInfo = options.pressureInfo || readPointerPressureInfo(pointerEvent);
+  const hardwarePressure = pressureInfo.hardwarePressure;
   if (hardwarePressure !== null) {
     const previousPressure = Number(options.fallbackPressure);
     if (Number.isFinite(previousPressure) && previousPressure > 0) {
@@ -117,6 +133,15 @@ function normalizePressure(pointerEvent, pressureEnabled, options = {}) {
 
   return 1;
 }
+
+const IDLE_PRESSURE_INPUT = {
+  pointerType: "idle",
+  rawPressure: null,
+  hardwarePressure: null,
+  source: "none",
+  sampleCount: 0,
+  hasHardwarePressure: false
+};
 
 function mediaErrorMessage(mediaError) {
   if (!mediaError) {
@@ -255,6 +280,7 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isGapPreview, setIsGapPreview] = useState(false);
   const [currentPressure, setCurrentPressure] = useState(0);
+  const [currentPressureInput, setCurrentPressureInput] = useState(IDLE_PRESSURE_INPUT);
   const [brush, setBrush] = useState(DEFAULT_BRUSH);
   const [onionSkin, setOnionSkin] = useState(false);
   const [status, setStatus] = useState("Ready. Open a local video to start annotating.");
@@ -309,7 +335,7 @@ function App() {
   }, []);
 
   const updateCurrentPressure = useCallback((value, options = {}) => {
-    const { force = false } = options;
+    const { force = false, input = null } = options;
     const safe = clamp(Number(value) || 0, 0, 1);
     const now = performance.now();
     const prevUi = currentPressureUiRef.current;
@@ -317,6 +343,9 @@ function App() {
       currentPressureUiRef.current = safe;
       pressureUiUpdatedAtRef.current = now;
       setCurrentPressure(safe);
+      if (input) {
+        setCurrentPressureInput(input);
+      }
     }
   }, []);
 
@@ -467,7 +496,6 @@ function App() {
           setIsPlaying(false);
         }
         setCurrentVideoClipId(null);
-        setVideoUrl("");
         if (video) {
           video.pause();
         }
@@ -513,6 +541,51 @@ function App() {
       video.currentTime = localMs / 1000;
     }
   }, [videoUrl]);
+
+  const continueTimelineAfterVideoEnded = useCallback(() => {
+    const video = videoRef.current;
+    const fps = Math.max(videoMetaRef.current.fps || 30, 1);
+    const frameStepMs = 1000 / fps;
+    const ordered = sortVideoClips(videoClipsRef.current);
+    const activeClip = ordered.find((clip) => clip.id === currentVideoClipIdRef.current) || null;
+    const timelineEndMs = resolveTimelineEndMs();
+    const mediaDurationMs = Number.isFinite(Number(video?.duration)) ? Number(video.duration) * 1000 : 0;
+    let currentMs = Math.max(playheadMsRef.current, currentTimeRef.current * 1000);
+
+    if (activeClip) {
+      const sourceStartMs = Number(activeClip.sourceStartMs) || 0;
+      const sourceEndMs = Number.isFinite(Number(activeClip.sourceEndMs))
+        ? Number(activeClip.sourceEndMs)
+        : Math.max(sourceStartMs, mediaDurationMs);
+      const activeEndMs = (Number(activeClip.timelineStartMs) || 0) + Math.max(0, sourceEndMs - sourceStartMs);
+      currentMs = Math.max(currentMs, activeEndMs);
+    }
+
+    const nextGlobalMs = Math.min(timelineEndMs, currentMs + frameStepMs);
+    if (timelineEndMs > 0 && nextGlobalMs < timelineEndMs - 0.5) {
+      const nextClip = findVideoClipAtTime(ordered, nextGlobalMs, {
+        preferredLayerId: activeVideoLayerIdRef.current,
+        layerOrderIds: (videoLayersRef.current || []).map((layer) => layer.id)
+      });
+      if (nextClip) {
+        seekGlobalTimeMs(nextGlobalMs, { autoplay: true });
+        return;
+      }
+
+      setPlayheadMs(nextGlobalMs);
+      setCurrentVideoClipId(null);
+      setIsGapPreview(true);
+      gapPlaybackRef.current = true;
+      gapTickLastPerfRef.current = performance.now();
+      setIsPlaying(true);
+      return;
+    }
+
+    gapPlaybackRef.current = false;
+    gapTickLastPerfRef.current = null;
+    setIsGapPreview(false);
+    setIsPlaying(false);
+  }, [resolveTimelineEndMs, seekGlobalTimeMs, setPlayheadMs]);
 
   const drawOverlay = useCallback((timeSeconds) => {
     const canvas = canvasRef.current;
@@ -714,7 +787,7 @@ function App() {
       activeStrokeRef.current = null;
       pointerIdRef.current = null;
       dirtyRef.current = true;
-      updateCurrentPressure(0, { force: true });
+      updateCurrentPressure(0, { force: true, input: IDLE_PRESSURE_INPUT });
       return;
     }
 
@@ -736,7 +809,7 @@ function App() {
     activeStrokeRef.current = null;
     pointerIdRef.current = null;
     dirtyRef.current = true;
-    updateCurrentPressure(0, { force: true });
+    updateCurrentPressure(0, { force: true, input: IDLE_PRESSURE_INPUT });
   }, [updateCurrentPressure]);
 
   const handleCanvasPointerDown = useCallback(
@@ -761,10 +834,13 @@ function App() {
       event.preventDefault();
       event.currentTarget.setPointerCapture(event.pointerId);
 
-      const nowSeconds = videoRef.current?.currentTime || 0;
+      const nowSeconds = currentTimeRef.current || videoRef.current?.currentTime || 0;
       const nowMs = nowSeconds * 1000;
       const frame = frameFromTimeMs(nowMs, videoMetaRef.current.fps);
-      const startPressure = normalizePressure(event, brushRef.current.pressureEnabled);
+      const pressureInfo = readPointerPressureInfo(event);
+      const startPressure = normalizePressure(event, brushRef.current.pressureEnabled, {
+        pressureInfo
+      });
 
       activeStrokeRef.current = {
         id: createId("stroke"),
@@ -793,7 +869,7 @@ function App() {
 
       pointerIdRef.current = event.pointerId;
       dirtyRef.current = true;
-      updateCurrentPressure(startPressure, { force: true });
+      updateCurrentPressure(startPressure, { force: true, input: pressureInfo });
     },
     [exportState.running, mapPointerToVideo, updateCurrentPressure, videoPath]
   );
@@ -819,11 +895,13 @@ function App() {
         return;
       }
 
-      const nowSeconds = videoRef.current?.currentTime || 0;
+      const nowSeconds = currentTimeRef.current || videoRef.current?.currentTime || 0;
       const nowMs = nowSeconds * 1000;
       const frame = frameFromTimeMs(nowMs, videoMetaRef.current.fps);
+      const pressureInfo = readPointerPressureInfo(event);
       const nextPressure = normalizePressure(event, stroke.pressureEnabled, {
-        fallbackPressure: previousPoint.pressure
+        fallbackPressure: previousPoint.pressure,
+        pressureInfo
       });
 
       stroke.points.push({
@@ -834,7 +912,7 @@ function App() {
       stroke.endFrame = Math.max(stroke.endFrame, frame);
 
       dirtyRef.current = true;
-      updateCurrentPressure(nextPressure);
+      updateCurrentPressure(nextPressure, { input: pressureInfo });
     },
     [mapPointerToVideo, updateCurrentPressure]
   );
@@ -1679,12 +1757,18 @@ function App() {
 
       const exportFps = Number(options?.fps) > 0 ? Number(options.fps) : (videoMetaRef.current.fps || 30);
       const bitrateMbps = Number(options?.bitrateMbps) > 0 ? Number(options.bitrateMbps) : 12;
+      const exportWidth = Number(options?.width) || videoMetaRef.current.width;
+      const exportHeight = Number(options?.height) || videoMetaRef.current.height;
 
       const recordingBytes = await renderAndRecordAnnotatedVideo({
         videoUrl,
         videoClips: videoClipsRef.current,
         layers: layersRef.current,
-        videoMeta: videoMetaRef.current,
+        videoMeta: {
+          ...videoMetaRef.current,
+          width: exportWidth,
+          height: exportHeight
+        },
         onionSkin: false,
         outputFps: exportFps,
         recordingBitrate: Math.round(bitrateMbps * 1_000_000),
@@ -1709,8 +1793,8 @@ function App() {
         encoderMode: options?.encoderMode || "auto",
         bitrateMbps,
         outputFormat: options?.format || "mp4",
-        outputWidth: Number(options?.width) || videoMetaRef.current.width,
-        outputHeight: Number(options?.height) || videoMetaRef.current.height,
+        outputWidth: exportWidth,
+        outputHeight: exportHeight,
         audioBitrate: "192k"
       });
 
@@ -1750,6 +1834,7 @@ function App() {
         <Toolbar
           brush={brush}
           currentPressure={currentPressure}
+          currentPressureInput={currentPressureInput}
           onionSkin={onionSkin}
           onBrushChange={handleBrushChange}
           onSetOnionSkin={setOnionSkin}
@@ -1784,7 +1869,7 @@ function App() {
                       setIsPlaying(false);
                     }
                   }}
-                  onEnded={() => setIsPlaying(false)}
+                  onEnded={continueTimelineAfterVideoEnded}
                   onLoadedMetadata={(event) => {
                     const video = event.currentTarget;
                     const pendingSeek = pendingVideoSeekRef.current;
