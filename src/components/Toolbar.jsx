@@ -18,6 +18,11 @@ function Toolbar({
     ? rawPressure.toFixed(rawPressure > 1 ? 0 : 3)
     : "--";
   const pointerLabel = currentPressureInput?.pointerType || "unknown";
+  const hasHardwarePressure = Boolean(currentPressureInput?.hasHardwarePressure);
+  const isMousePressureFallback = pointerLabel === "mouse"
+    && Number.isFinite(rawPressure)
+    && Math.abs(rawPressure - 0.5) < 0.0001
+    && !hasHardwarePressure;
   const sourceLabel = currentPressureInput?.hasHardwarePressure
     ? currentPressureInput.source
     : "no real pressure";
@@ -106,6 +111,11 @@ function Toolbar({
               <span>
                 Input: {pointerLabel} | Raw: {rawPressureLabel} | Source: {sourceLabel}
               </span>
+              {isMousePressureFallback ? (
+                <span className="pressure-warning">
+                  Mouse emulation detected. Enable Windows Ink in the Huion driver/app profile.
+                </span>
+              ) : null}
             </div>
           </div>
 

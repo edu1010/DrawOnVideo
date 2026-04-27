@@ -1631,7 +1631,12 @@ function App() {
       return;
     }
 
-    const exists = ordered.some((clip) => clip.id === currentVideoClipIdRef.current);
+    const activeClipId = currentVideoClipIdRef.current;
+    if (!activeClipId) {
+      return;
+    }
+
+    const exists = ordered.some((clip) => clip.id === activeClipId);
     if (!exists) {
       const first = ordered[0];
       currentVideoClipIdRef.current = first.id;

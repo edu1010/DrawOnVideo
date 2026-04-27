@@ -221,6 +221,10 @@ button.danger {
   letter-spacing: 0;
 }
 
+.pressure-live-value .pressure-warning {
+  color: #ffb36b;
+}
+
 .tool-row {
   display: flex;
   gap: 8px;
