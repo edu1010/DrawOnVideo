@@ -13,7 +13,9 @@ function Toolbar({
   canDraw
 }) {
   const safePressure = Math.max(0, Math.min(1, Number(currentPressure) || 0));
-  const rawPressure = Number(currentPressureInput?.rawPressure);
+  const rawPressure = currentPressureInput?.rawPressure === null
+    ? NaN
+    : Number(currentPressureInput?.rawPressure);
   const rawPressureLabel = Number.isFinite(rawPressure)
     ? rawPressure.toFixed(rawPressure > 1 ? 0 : 3)
     : "--";

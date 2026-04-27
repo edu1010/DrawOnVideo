@@ -226,13 +226,23 @@ function annotationTimelineDurationMs(layers, fps = 30) {
   return maxEnd;
 }
 
-function playAfterSeek(video, targetSeconds) {
+function seekVideoElement(video, targetSeconds, options = {}) {
+  const { autoplay = false, onSettled = null } = options;
   const desiredSeconds = Math.max(0, Number(targetSeconds) || 0);
   const currentSeconds = Math.max(0, Number(video.currentTime) || 0);
   const epsilon = 1 / 240;
 
+  const finish = () => {
+    if (typeof onSettled === "function") {
+      onSettled();
+    }
+    if (autoplay) {
+      video.play().catch(() => {});
+    }
+  };
+
   if (Math.abs(currentSeconds - desiredSeconds) <= epsilon) {
-    video.play().catch(() => {});
+    finish();
     return;
   }
 
@@ -248,19 +258,25 @@ function playAfterSeek(video, targetSeconds) {
     if (fallbackId !== null) {
       window.clearTimeout(fallbackId);
     }
+    finish();
   };
 
   const onSeeked = () => {
     cleanup();
-    video.play().catch(() => {});
   };
 
   video.addEventListener("seeked", onSeeked, { once: true });
   fallbackId = window.setTimeout(() => {
     cleanup();
-    video.play().catch(() => {});
   }, 180);
   video.currentTime = desiredSeconds;
+}
+
+function playAfterSeek(video, targetSeconds, options = {}) {
+  seekVideoElement(video, targetSeconds, {
+    ...options,
+    autoplay: true
+  });
 }
 
 function App() {
@@ -538,10 +554,22 @@ function App() {
       setActiveVideoLayerId(clip.videoLayerId);
     }
 
+    pendingVideoSeekRef.current = {
+      clipId: clip.id,
+      localMs,
+      autoplay
+    };
+    const clearPendingSeek = () => {
+      const pending = pendingVideoSeekRef.current;
+      if (pending?.clipId === clip.id && Math.abs((Number(pending.localMs) || 0) - localMs) <= 0.5) {
+        pendingVideoSeekRef.current = null;
+      }
+    };
+
     if (autoplay) {
-      playAfterSeek(video, localMs / 1000);
+      playAfterSeek(video, localMs / 1000, { onSettled: clearPendingSeek });
     } else {
-      video.currentTime = localMs / 1000;
+      seekVideoElement(video, localMs / 1000, { onSettled: clearPendingSeek });
     }
   }, [videoUrl]);
 
@@ -1906,12 +1934,20 @@ function App() {
                         setCurrentVideoClipId(pendingSeek.clipId);
                       }
                       const pendingSeconds = (Number(pendingSeek.localMs) || 0) / 1000;
+                      const clearPendingSeek = () => {
+                        const pending = pendingVideoSeekRef.current;
+                        if (
+                          pending?.clipId === pendingSeek.clipId
+                          && Math.abs((Number(pending.localMs) || 0) - (Number(pendingSeek.localMs) || 0)) <= 0.5
+                        ) {
+                          pendingVideoSeekRef.current = null;
+                        }
+                      };
                       if (pendingSeek.autoplay) {
-                        playAfterSeek(video, pendingSeconds);
+                        playAfterSeek(video, pendingSeconds, { onSettled: clearPendingSeek });
                       } else {
-                        video.currentTime = pendingSeconds;
+                        seekVideoElement(video, pendingSeconds, { onSettled: clearPendingSeek });
                       }
-                      pendingVideoSeekRef.current = null;
                     }
 
                     const loadedDurationSeconds = Number(video.duration);
