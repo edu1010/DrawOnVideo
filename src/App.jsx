@@ -65,13 +65,21 @@ function fileNameFromPath(filePath) {
 }
 
 function extractHardwarePressure(pointerEvent) {
-  const directPressure = Number(pointerEvent.pressure);
-  if (Number.isFinite(directPressure) && directPressure > 0) {
-    // Mouse pointers usually report 0.5 while pressed, which is not real pressure data.
-    if (pointerEvent.pointerType === "mouse" && Math.abs(directPressure - 0.5) < 0.0001) {
-      return null;
+  const samples = typeof pointerEvent.getCoalescedEvents === "function"
+    ? pointerEvent.getCoalescedEvents()
+    : [];
+  const candidates = [...samples, pointerEvent];
+
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const candidate = candidates[index];
+    const directPressure = Number(candidate.pressure);
+    if (Number.isFinite(directPressure) && directPressure > 0) {
+      // Mouse pointers usually report 0.5 while pressed, which is not real pressure data.
+      if (pointerEvent.pointerType === "mouse" && Math.abs(directPressure - 0.5) < 0.0001) {
+        continue;
+      }
+      return clamp(directPressure > 1 ? directPressure / 8191 : directPressure, 0.05, 1);
     }
-    return clamp(directPressure, 0.05, 1);
   }
 
   const fallbackForce = Number(pointerEvent.force ?? pointerEvent.webkitForce);
@@ -87,10 +95,6 @@ function normalizePressure(pointerEvent, pressureEnabled, options = {}) {
     return 1;
   }
 
-  if (pointerEvent.pointerType === "mouse") {
-    return 1;
-  }
-
   const hardwarePressure = extractHardwarePressure(pointerEvent);
   if (hardwarePressure !== null) {
     const previousPressure = Number(options.fallbackPressure);
@@ -100,6 +104,10 @@ function normalizePressure(pointerEvent, pressureEnabled, options = {}) {
       return clamp(smoothed, 0.05, 1);
     }
     return hardwarePressure;
+  }
+
+  if (pointerEvent.pointerType === "mouse") {
+    return 1;
   }
 
   const fallbackPressure = Number(options.fallbackPressure);
@@ -245,6 +253,7 @@ function App() {
   const [activeLayerId, setActiveLayerId] = useState(initialLayer.id);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isGapPreview, setIsGapPreview] = useState(false);
   const [currentPressure, setCurrentPressure] = useState(0);
   const [brush, setBrush] = useState(DEFAULT_BRUSH);
   const [onionSkin, setOnionSkin] = useState(false);
@@ -445,13 +454,16 @@ function App() {
       setPlayheadMs(safeTargetMs);
       if (!clip) {
         pendingVideoSeekRef.current = null;
+        dirtyRef.current = true;
         if (autoplay) {
           gapPlaybackRef.current = true;
           gapTickLastPerfRef.current = performance.now();
+          setIsGapPreview(true);
           setIsPlaying(true);
         } else {
           gapPlaybackRef.current = false;
           gapTickLastPerfRef.current = null;
+          setIsGapPreview(true);
           setIsPlaying(false);
         }
         setCurrentVideoClipId(null);
@@ -474,6 +486,7 @@ function App() {
     dirtyRef.current = true;
     gapPlaybackRef.current = false;
     gapTickLastPerfRef.current = null;
+    setIsGapPreview(false);
 
     const needsSourceSwap = videoUrl !== clip.url;
     if (needsSourceSwap) {
@@ -597,6 +610,7 @@ function App() {
             } else {
               gapPlaybackRef.current = false;
               gapTickLastPerfRef.current = null;
+              setIsGapPreview(false);
               video.pause();
             }
           }
@@ -640,10 +654,12 @@ function App() {
         if (visibleClip && pendingVideoSeekRef.current === null) {
           gapPlaybackRef.current = false;
           gapTickLastPerfRef.current = null;
+          setIsGapPreview(false);
           seekGlobalTimeMs(nextGlobalMs, { autoplay: true });
         } else if (timelineEndMs > 0 && nextGlobalMs >= timelineEndMs - 0.5) {
           gapPlaybackRef.current = false;
           gapTickLastPerfRef.current = null;
+          setIsGapPreview(false);
           setIsPlaying(false);
         }
       } else if (dirtyRef.current) {
@@ -907,6 +923,7 @@ function App() {
       setSelectedVideoClipIds([]);
       const initialTime = (initialClip?.timelineStartMs || 0) / 1000;
       setPlayheadMs(initialTime * 1000);
+      setIsGapPreview(false);
       renderStateRef.current = createRenderState();
       dirtyRef.current = true;
       setStatus(`Loaded video: ${selected}`);
@@ -1053,6 +1070,7 @@ function App() {
       setSelectedClips([]);
       setSelectedVideoClipIds([]);
       setPlayheadMs(0);
+      setIsGapPreview(false);
       renderStateRef.current = createRenderState();
       dirtyRef.current = true;
       setStatus(`Project loaded: ${loaded.filePath}`);
@@ -1077,6 +1095,7 @@ function App() {
       if (isPlaying) {
         gapPlaybackRef.current = false;
         gapTickLastPerfRef.current = null;
+        setIsGapPreview(false);
         video.pause();
         setIsPlaying(false);
         return;
@@ -1757,7 +1776,7 @@ function App() {
               >
                 <video
                   ref={videoRef}
-                  className="video-layer"
+                  className={`video-layer ${isGapPreview ? "gap-hidden" : ""}`}
                   src={videoUrl}
                   onPlay={() => setIsPlaying(true)}
                   onPause={() => {

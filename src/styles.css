@@ -264,6 +264,10 @@ button.danger {
   object-fit: contain;
 }
 
+.video-layer.gap-hidden {
+  opacity: 0;
+}
+
 .draw-layer {
   cursor: crosshair;
   touch-action: none;
