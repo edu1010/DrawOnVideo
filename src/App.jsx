@@ -245,6 +245,7 @@ function App() {
   const [activeLayerId, setActiveLayerId] = useState(initialLayer.id);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [currentPressure, setCurrentPressure] = useState(0);
   const [brush, setBrush] = useState(DEFAULT_BRUSH);
   const [onionSkin, setOnionSkin] = useState(false);
   const [status, setStatus] = useState("Ready. Open a local video to start annotating.");
@@ -279,6 +280,8 @@ function App() {
   const pendingVideoSeekRef = useRef(null);
   const gapPlaybackRef = useRef(false);
   const gapTickLastPerfRef = useRef(null);
+  const currentPressureUiRef = useRef(0);
+  const pressureUiUpdatedAtRef = useRef(0);
 
   const setPlayheadMs = useCallback((nextMs) => {
     const safeMs = Math.max(0, Number(nextMs) || 0);
@@ -294,6 +297,18 @@ function App() {
     const drawMs = annotationTimelineDurationMs(layersRef.current, fps);
     const metaMs = Math.max(0, (Number(videoMetaRef.current.duration) || 0) * 1000);
     return Math.max(clipMs, drawMs, metaMs);
+  }, []);
+
+  const updateCurrentPressure = useCallback((value, options = {}) => {
+    const { force = false } = options;
+    const safe = clamp(Number(value) || 0, 0, 1);
+    const now = performance.now();
+    const prevUi = currentPressureUiRef.current;
+    if (force || now - pressureUiUpdatedAtRef.current >= 33 || Math.abs(safe - prevUi) >= 0.05) {
+      currentPressureUiRef.current = safe;
+      pressureUiUpdatedAtRef.current = now;
+      setCurrentPressure(safe);
+    }
   }, []);
 
   useEffect(() => {
@@ -430,11 +445,6 @@ function App() {
       setPlayheadMs(safeTargetMs);
       if (!clip) {
         pendingVideoSeekRef.current = null;
-        setCurrentVideoClipId(null);
-        setVideoUrl("");
-        if (video) {
-          video.pause();
-        }
         if (autoplay) {
           gapPlaybackRef.current = true;
           gapTickLastPerfRef.current = performance.now();
@@ -443,6 +453,11 @@ function App() {
           gapPlaybackRef.current = false;
           gapTickLastPerfRef.current = null;
           setIsPlaying(false);
+        }
+        setCurrentVideoClipId(null);
+        setVideoUrl("");
+        if (video) {
+          video.pause();
         }
       }
       return;
@@ -516,7 +531,7 @@ function App() {
     const tick = () => {
       const video = videoRef.current;
 
-      if (video && videoUrl) {
+      if (video && videoUrl && !gapPlaybackRef.current) {
         const orderedClips = sortVideoClips(videoClipsRef.current);
         const activeClip = orderedClips.find((clip) => clip.id === currentVideoClipIdRef.current) || null;
 
@@ -563,6 +578,7 @@ function App() {
         if (
           isPlaying
           && pendingVideoSeekRef.current === null
+          && activeClip
           && visibleClip
           && visibleClip.id !== currentVideoClipIdRef.current
         ) {
@@ -682,6 +698,7 @@ function App() {
       activeStrokeRef.current = null;
       pointerIdRef.current = null;
       dirtyRef.current = true;
+      updateCurrentPressure(0, { force: true });
       return;
     }
 
@@ -703,7 +720,8 @@ function App() {
     activeStrokeRef.current = null;
     pointerIdRef.current = null;
     dirtyRef.current = true;
-  }, []);
+    updateCurrentPressure(0, { force: true });
+  }, [updateCurrentPressure]);
 
   const handleCanvasPointerDown = useCallback(
     (event) => {
@@ -730,6 +748,7 @@ function App() {
       const nowSeconds = videoRef.current?.currentTime || 0;
       const nowMs = nowSeconds * 1000;
       const frame = frameFromTimeMs(nowMs, videoMetaRef.current.fps);
+      const startPressure = normalizePressure(event, brushRef.current.pressureEnabled);
 
       activeStrokeRef.current = {
         id: createId("stroke"),
@@ -751,15 +770,16 @@ function App() {
           {
             ...point,
             timeMs: nowMs,
-            pressure: normalizePressure(event, brushRef.current.pressureEnabled)
+            pressure: startPressure
           }
         ]
       };
 
       pointerIdRef.current = event.pointerId;
       dirtyRef.current = true;
+      updateCurrentPressure(startPressure, { force: true });
     },
-    [exportState.running, mapPointerToVideo, videoPath]
+    [exportState.running, mapPointerToVideo, updateCurrentPressure, videoPath]
   );
 
   const handleCanvasPointerMove = useCallback(
@@ -786,19 +806,21 @@ function App() {
       const nowSeconds = videoRef.current?.currentTime || 0;
       const nowMs = nowSeconds * 1000;
       const frame = frameFromTimeMs(nowMs, videoMetaRef.current.fps);
+      const nextPressure = normalizePressure(event, stroke.pressureEnabled, {
+        fallbackPressure: previousPoint.pressure
+      });
 
       stroke.points.push({
         ...point,
         timeMs: nowMs,
-        pressure: normalizePressure(event, stroke.pressureEnabled, {
-          fallbackPressure: previousPoint.pressure
-        })
+        pressure: nextPressure
       });
       stroke.endFrame = Math.max(stroke.endFrame, frame);
 
       dirtyRef.current = true;
+      updateCurrentPressure(nextPressure);
     },
-    [mapPointerToVideo]
+    [mapPointerToVideo, updateCurrentPressure]
   );
 
   const handleCanvasPointerUp = useCallback(
@@ -1708,6 +1730,7 @@ function App() {
       >
         <Toolbar
           brush={brush}
+          currentPressure={currentPressure}
           onionSkin={onionSkin}
           onBrushChange={handleBrushChange}
           onSetOnionSkin={setOnionSkin}

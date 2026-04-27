@@ -201,6 +201,17 @@ button.danger {
   padding: 4px;
 }
 
+.pressure-live-value {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(12, 22, 33, 0.9);
+  color: #f8c77d;
+  padding: 8px 10px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 .tool-row {
   display: flex;
   gap: 8px;

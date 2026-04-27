@@ -2,6 +2,7 @@ import { PRESSURE_PRESETS, TOOL_BRUSH, TOOL_ERASER } from "../constants";
 
 function Toolbar({
   brush,
+  currentPressure,
   onionSkin,
   onBrushChange,
   onSetOnionSkin,
@@ -87,6 +88,13 @@ function Toolbar({
 
       {brush.pressureEnabled ? (
         <>
+          <div className="control-group">
+            <label>Current Pressure</label>
+            <div className="pressure-live-value">
+              {(Math.max(0, Math.min(1, Number(currentPressure) || 0)) * 100).toFixed(0)}%
+            </div>
+          </div>
+
           <div className="control-group">
             <label>Pressure Presets</label>
             <div className="tool-row wrap">
