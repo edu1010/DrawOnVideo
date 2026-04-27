@@ -163,7 +163,7 @@ function volumeFromDb(db) {
 function clipLocalRangeMs(clip, videoDurationMs = 0) {
   const startMs = Math.max(0, Number(clip?.sourceStartMs) || 0);
   const explicitEnd = Number(clip?.sourceEndMs);
-  if (Number.isFinite(explicitEnd) && explicitEnd > startMs) {
+  if (Number.isFinite(explicitEnd) && explicitEnd >= startMs) {
     return { startMs, endMs: explicitEnd };
   }
 
@@ -177,6 +177,20 @@ function clipLocalRangeMs(clip, videoDurationMs = 0) {
   }
 
   return { startMs, endMs: startMs + 1000 };
+}
+
+function annotationTimelineDurationMs(layers, fps = 30) {
+  let maxEnd = 0;
+  for (const layer of layers || []) {
+    for (const stroke of layer.strokes || []) {
+      const windowMs = strokeClipWindowMs(stroke, fps, Number.POSITIVE_INFINITY);
+      const candidateEnd = Number.isFinite(windowMs.clipEndMs)
+        ? windowMs.clipEndMs
+        : windowMs.drawEndMs;
+      maxEnd = Math.max(maxEnd, Number(candidateEnd) || 0);
+    }
+  }
+  return maxEnd;
 }
 
 function playAfterSeek(video, targetSeconds) {
@@ -341,13 +355,30 @@ function App() {
       width: Number(first.width) || prev.width || DEFAULT_VIDEO_META.width,
       height: Number(first.height) || prev.height || DEFAULT_VIDEO_META.height,
       fps: Number(first.fps) || prev.fps || DEFAULT_VIDEO_META.fps,
-      duration: totalMs / 1000
+      duration: Math.max(totalMs, annotationTimelineDurationMs(layersRef.current, Number(first.fps) || prev.fps || DEFAULT_VIDEO_META.fps)) / 1000
     }));
 
     if (!videoPath) {
       setVideoPath(first.path || "");
     }
   }, [videoClips, videoPath]);
+
+  useEffect(() => {
+    const videoMs = totalTimelineDurationMs(videoClips);
+    const drawMs = annotationTimelineDurationMs(layers, videoMeta.fps);
+    const nextDuration = Math.max(videoMs, drawMs) / 1000;
+
+    setVideoMeta((prev) => {
+      const prevDuration = Number(prev.duration) || 0;
+      if (Math.abs(prevDuration - nextDuration) <= 0.0005) {
+        return prev;
+      }
+      return {
+        ...prev,
+        duration: nextDuration
+      };
+    });
+  }, [layers, videoClips, videoMeta.fps]);
 
   const seekGlobalTimeMs = useCallback((targetMs, options = {}) => {
     const { autoplay = false } = options;
@@ -387,6 +418,17 @@ function App() {
 
     if (!clip || !video) {
       setPlayheadMs(safeTargetMs);
+      if (!clip) {
+        pendingVideoSeekRef.current = null;
+        setCurrentVideoClipId(null);
+        setVideoUrl("");
+        if (video) {
+          video.pause();
+        }
+        if (autoplay) {
+          setIsPlaying(false);
+        }
+      }
       return;
     }
 
@@ -944,7 +986,7 @@ function App() {
 
   const handleTogglePlay = useCallback(async () => {
     const video = videoRef.current;
-    if (!video || !videoUrl || videoClipsRef.current.length === 0) {
+    if (!video || videoClipsRef.current.length === 0) {
       return;
     }
 
@@ -1010,10 +1052,11 @@ function App() {
     }
 
     const timelineDuration = totalTimelineDurationMs(videoClipsRef.current) / 1000;
+    const drawingDuration = annotationTimelineDurationMs(layersRef.current, videoMetaRef.current.fps) / 1000;
     const mediaDuration = Number.isFinite(Number(videoRef.current?.duration))
       ? Number(videoRef.current.duration)
       : 0;
-    const duration = Math.max(Number(videoMetaRef.current.duration) || 0, timelineDuration, mediaDuration);
+    const duration = Math.max(Number(videoMetaRef.current.duration) || 0, timelineDuration, drawingDuration, mediaDuration);
     const safeTime = clamp(nextTime, 0, duration);
     seekGlobalTimeMs(safeTime * 1000, { autoplay: false });
   }, [seekGlobalTimeMs]);
@@ -1269,9 +1312,7 @@ function App() {
   }, []);
 
   const handleMoveClip = useCallback((layerId, strokeId, nextWindow) => {
-    const durationMs = Number(videoMetaRef.current.duration) > 0
-      ? Number(videoMetaRef.current.duration) * 1000
-      : Number.POSITIVE_INFINITY;
+    const durationMs = Number.POSITIVE_INFINITY;
 
     setLayers((prevLayers) =>
       updateStrokeOnLayer(prevLayers, layerId, strokeId, (stroke) => {
@@ -1283,9 +1324,7 @@ function App() {
   }, []);
 
   const handleTrimClip = useCallback((layerId, strokeId, nextWindow) => {
-    const durationMs = Number(videoMetaRef.current.duration) > 0
-      ? Number(videoMetaRef.current.duration) * 1000
-      : Number.POSITIVE_INFINITY;
+    const durationMs = Number.POSITIVE_INFINITY;
 
     setLayers((prevLayers) =>
       updateStrokeOnLayer(prevLayers, layerId, strokeId, (stroke) =>
@@ -1303,9 +1342,7 @@ function App() {
   }, []);
 
   const handleSplitClip = useCallback((layerId, strokeId, cutMs) => {
-    const durationMs = Number(videoMetaRef.current.duration) > 0
-      ? Number(videoMetaRef.current.duration) * 1000
-      : Number.POSITIVE_INFINITY;
+    const durationMs = Number.POSITIVE_INFINITY;
     let nextSelected = null;
 
     setLayers((prevLayers) =>
@@ -1673,7 +1710,7 @@ function App() {
 
                           const currentStart = Number(clip.sourceStartMs) || 0;
                           const currentEnd = Number(clip.sourceEndMs);
-                          const hasValidRange = Number.isFinite(currentEnd) && currentEnd > currentStart;
+                          const hasValidRange = Number.isFinite(currentEnd) && currentEnd >= currentStart;
                           const currentDuration = Number(clip.sourceDurationMs) || 0;
 
                           const patch = {};

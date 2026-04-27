@@ -230,23 +230,7 @@ function TimelineBar({
   const dragRef = useRef(null);
 
   const durationSafe = Number.isFinite(duration) && duration > 0 ? duration : 0;
-  const durationMs = durationSafe * 1000;
   const frameMs = fps > 0 ? 1000 / fps : 0;
-
-  const contentWidth = Math.max(1200, durationSafe * pixelsPerSecond + 64);
-  const rulerStep = niceStepSeconds(pixelsPerSecond);
-
-  const rulerTicks = useMemo(() => {
-    if (durationSafe <= 0) {
-      return [];
-    }
-
-    const ticks = [];
-    for (let time = 0; time <= durationSafe + 0.0001; time += rulerStep) {
-      ticks.push(Number(time.toFixed(4)));
-    }
-    return ticks;
-  }, [durationSafe, rulerStep]);
 
   const selectedClipKeys = useMemo(() => {
     const keys = new Set();
@@ -258,6 +242,52 @@ function TimelineBar({
 
   const selectedVideoIds = useMemo(() => new Set(selectedVideoClipIds || []), [selectedVideoClipIds]);
   const videoLayerRows = useMemo(() => [...(videoLayers || [])].reverse(), [videoLayers]);
+  const videoLayerClipsById = useMemo(() => {
+    const byId = new Map();
+    for (const clip of videoClips || []) {
+      const layerId = String(clip.videoLayerId || "");
+      if (!byId.has(layerId)) {
+        byId.set(layerId, []);
+      }
+      byId.get(layerId).push(clip);
+    }
+    return byId;
+  }, [videoClips]);
+  const maxVideoEndSec = useMemo(() => {
+    let maxEndMs = 0;
+    for (const clip of videoClips || []) {
+      maxEndMs = Math.max(maxEndMs, Number(clipTimelineEndMs(clip)) || 0);
+    }
+    return maxEndMs / 1000;
+  }, [videoClips]);
+  const maxDrawEndSec = useMemo(() => {
+    let maxEndMs = 0;
+    for (const layer of layers || []) {
+      for (const stroke of layer.strokes || []) {
+        const clipWindow = strokeClipWindowMs(stroke, fps, Number.POSITIVE_INFINITY);
+        const candidateEnd = Number.isFinite(clipWindow.clipEndMs)
+          ? clipWindow.clipEndMs
+          : clipWindow.drawEndMs;
+        maxEndMs = Math.max(maxEndMs, Number(candidateEnd) || 0);
+      }
+    }
+    return maxEndMs / 1000;
+  }, [fps, layers]);
+  const timelineSpanSec = Math.max(durationSafe, maxVideoEndSec, maxDrawEndSec);
+  const contentWidth = Math.max(1200, timelineSpanSec * pixelsPerSecond + 64);
+  const rulerStep = niceStepSeconds(pixelsPerSecond);
+
+  const rulerTicks = useMemo(() => {
+    if (timelineSpanSec <= 0) {
+      return [];
+    }
+
+    const ticks = [];
+    for (let time = 0; time <= timelineSpanSec + 0.0001; time += rulerStep) {
+      ticks.push(Number(time.toFixed(4)));
+    }
+    return ticks;
+  }, [rulerStep, timelineSpanSec]);
 
   const selectedVideoClip = useMemo(() => {
     const selectedId = selectedVideoClipIds?.[0];
@@ -345,13 +375,13 @@ function TimelineBar({
     const content = contentRef.current;
     const scroller = scrollRef.current;
 
-    if (!content || !scroller || durationSafe <= 0) {
+    if (!content || !scroller || timelineSpanSec <= 0) {
       return 0;
     }
 
     const rect = content.getBoundingClientRect();
     const relativeX = clientX - rect.left + scroller.scrollLeft;
-    return clamp(relativeX / pixelsPerSecond, 0, durationSafe);
+    return clamp(relativeX / pixelsPerSecond, 0, timelineSpanSec);
   }
 
   function clientPointToVideoLayerId(clientX, clientY) {
@@ -368,7 +398,7 @@ function TimelineBar({
     return thumbnails.map((item, index) => {
       const next = thumbnails[index + 1];
       const startX = item.time * pixelsPerSecond;
-      const endX = (next ? next.time : durationSafe) * pixelsPerSecond;
+      const endX = (next ? next.time : timelineSpanSec) * pixelsPerSecond;
       const width = Math.max(28, endX - startX);
 
       return (
@@ -405,15 +435,6 @@ function TimelineBar({
           nextStartMs = 0;
         }
 
-        if (durationMs > 0 && nextEndMs > durationMs) {
-          const overflow = nextEndMs - durationMs;
-          nextStartMs -= overflow;
-          nextEndMs = durationMs;
-          if (nextStartMs < 0) {
-            nextStartMs = 0;
-          }
-        }
-
         if (drag.kind === "video") {
           moveTarget?.(drag.targetId, {
             startMs: nextStartMs,
@@ -442,11 +463,7 @@ function TimelineBar({
         }
       } else if (drag.mode === "trimEnd") {
         const lowerBound = drag.originalStartMs + MIN_CLIP_MS;
-        const nextEndMs = clamp(
-          drag.originalEndMs + deltaMs,
-          lowerBound,
-          durationMs > 0 ? durationMs : Number.POSITIVE_INFINITY
-        );
+        const nextEndMs = Math.max(lowerBound, drag.originalEndMs + deltaMs);
 
         if (drag.kind === "video") {
           trimTarget?.(drag.targetId, {
@@ -483,7 +500,7 @@ function TimelineBar({
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
     };
-  }, [durationMs, onAssignVideoClipLayer, onMoveClip, onMoveVideoClip, onTrimClip, onTrimVideoClip]);
+  }, [onAssignVideoClipLayer, onMoveClip, onMoveVideoClip, onTrimClip, onTrimVideoClip]);
 
   function beginDrag(event, payload) {
     if (disabled) {
@@ -531,7 +548,7 @@ function TimelineBar({
         </button>
 
         <span className="time-readout">
-          {formatTime(currentTime)} / {formatTime(durationSafe)}
+          {formatTime(currentTime)} / {formatTime(timelineSpanSec)}
         </span>
 
         <span className="time-readout">
@@ -689,19 +706,19 @@ function TimelineBar({
                 data-layer-id={videoLayer.id}
                 style={{ height: `${trackHeight}px` }}
               >
-                {renderTrackThumbnails(`video-${videoLayer.id}`)}
-                {(videoClips || [])
-                  .filter((clip) => (clip.videoLayerId || "") === videoLayer.id)
-                  .map((clip, index) => {
+                {(videoLayerClipsById.get(videoLayer.id)?.length || 0) > 0
+                  ? renderTrackThumbnails(`video-${videoLayer.id}`)
+                  : null}
+                {(videoLayerClipsById.get(videoLayer.id) || []).map((clip, index) => {
                     const startSec = (Number(clip.timelineStartMs) || 0) / 1000;
                     const endSec = (Number(clipTimelineEndMs(clip)) || 0) / 1000;
 
-                    if (!Number.isFinite(endSec) || endSec <= 0 || startSec >= durationSafe) {
+                    if (!Number.isFinite(endSec) || endSec <= 0 || startSec >= timelineSpanSec) {
                       return null;
                     }
 
-                    const safeStart = clamp(startSec, 0, durationSafe);
-                    const safeEnd = clamp(endSec, 0, durationSafe);
+                    const safeStart = clamp(startSec, 0, timelineSpanSec);
+                    const safeEnd = clamp(endSec, 0, timelineSpanSec);
                     const left = safeStart * pixelsPerSecond;
                     const width = Math.max(14, (safeEnd - safeStart) * pixelsPerSecond);
                     const isSelected = selectedVideoIds.has(clip.id);
@@ -817,18 +834,20 @@ function TimelineBar({
 
             {layers.map((layer) => (
               <div className="timeline-track timeline-track-with-thumbs" key={`track-${layer.id}`} style={{ height: `${trackHeight}px` }}>
-                {renderTrackThumbnails(`draw-${layer.id}`)}
+                {(layer.strokes || []).length > 0 ? renderTrackThumbnails(`draw-${layer.id}`) : null}
                 {(layer.strokes || []).map((stroke, index) => {
-                  const windowMs = strokeClipWindowMs(stroke, fps, durationMs || Number.POSITIVE_INFINITY);
+                  const windowMs = strokeClipWindowMs(stroke, fps, Number.POSITIVE_INFINITY);
                   const clipStartSec = windowMs.clipStartMs / 1000;
-                  const clipEndSec = (Number.isFinite(windowMs.clipEndMs) ? windowMs.clipEndMs : durationMs) / 1000;
+                  const clipEndSec = (Number.isFinite(windowMs.clipEndMs)
+                    ? windowMs.clipEndMs
+                    : timelineSpanSec * 1000) / 1000;
 
-                  if (!Number.isFinite(clipEndSec) || clipEndSec <= 0 || clipStartSec >= durationSafe) {
+                  if (!Number.isFinite(clipEndSec) || clipEndSec <= 0 || clipStartSec >= timelineSpanSec) {
                     return null;
                   }
 
-                  const safeStart = clamp(clipStartSec, 0, durationSafe);
-                  const safeEnd = clamp(clipEndSec, 0, durationSafe);
+                  const safeStart = clamp(clipStartSec, 0, timelineSpanSec);
+                  const safeEnd = clamp(clipEndSec, 0, timelineSpanSec);
                   const left = safeStart * pixelsPerSecond;
                   const width = Math.max(12, (safeEnd - safeStart) * pixelsPerSecond);
                   const isSelected = selectedClipKeys.has(`${layer.id}::${stroke.id}`);
@@ -916,9 +935,9 @@ function TimelineBar({
         className="timeline-slider"
         type="range"
         min={0}
-        max={Math.max(durationSafe, 0.001)}
+        max={Math.max(timelineSpanSec, 0.001)}
         step={1 / Math.max(fps || 30, 1)}
-        value={Math.min(currentTime, durationSafe || 0)}
+        value={Math.min(currentTime, timelineSpanSec || 0)}
         onChange={(event) => onSeek(Number(event.target.value))}
         disabled={disabled}
       />

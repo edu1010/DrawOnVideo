@@ -8,7 +8,7 @@ function safeNumber(value, fallback = 0) {
 function clipSourceRangeMs(clip) {
   const start = Math.max(0, safeNumber(clip?.sourceStartMs));
   const rawEnd = Number(clip?.sourceEndMs);
-  if (Number.isFinite(rawEnd) && rawEnd > start) {
+  if (Number.isFinite(rawEnd) && rawEnd >= start) {
     return { startMs: start, endMs: rawEnd };
   }
 
@@ -20,13 +20,26 @@ function clipSourceRangeMs(clip) {
   return { startMs: start, endMs: start };
 }
 
-export function clipDurationMs(clip) {
+export function clipSourceDurationMs(clip) {
   const range = clipSourceRangeMs(clip);
   return Math.max(0, range.endMs - range.startMs);
 }
 
+export function clipDurationMs(clip) {
+  return clipSourceDurationMs(clip);
+}
+
+export function clipTimelineDurationMs(clip) {
+  const timelineDuration = Number(clip?.timelineDurationMs);
+  if (Number.isFinite(timelineDuration) && timelineDuration > 0) {
+    return Math.max(0, timelineDuration);
+  }
+
+  return clipSourceDurationMs(clip);
+}
+
 export function clipTimelineEndMs(clip) {
-  return safeNumber(clip?.timelineStartMs) + clipDurationMs(clip);
+  return safeNumber(clip?.timelineStartMs) + clipTimelineDurationMs(clip);
 }
 
 export function sortVideoClips(clips) {
@@ -55,6 +68,7 @@ export function createVideoClip({
   sourceDurationMs,
   sourceStartMs = 0,
   sourceEndMs,
+  timelineDurationMs,
   timelineStartMs = 0,
   videoLayerId = "",
   audioMuted = false,
@@ -68,6 +82,11 @@ export function createVideoClip({
   const end = Number.isFinite(Number(sourceEndMs))
     ? Math.min(duration, Math.max(start, Number(sourceEndMs)))
     : duration;
+  const sourceSpan = Math.max(0, end - start);
+  const explicitTimelineDuration = Number(timelineDurationMs);
+  const normalizedTimelineDuration = Number.isFinite(explicitTimelineDuration) && explicitTimelineDuration > 0
+    ? Math.max(0, explicitTimelineDuration)
+    : sourceSpan;
 
   return {
     id: createId("vclip"),
@@ -77,6 +96,7 @@ export function createVideoClip({
     sourceDurationMs: duration,
     sourceStartMs: start,
     sourceEndMs: end,
+    timelineDurationMs: normalizedTimelineDuration,
     timelineStartMs: Math.max(0, safeNumber(timelineStartMs)),
     videoLayerId: String(videoLayerId || ""),
     audioMuted: Boolean(audioMuted),
@@ -145,24 +165,7 @@ export function findVideoClipAtTime(clips, timeMs, options = {}) {
     }
     return matches[matches.length - 1];
   }
-
-  let bestByStart = null;
-  for (const clip of ordered) {
-    const start = safeNumber(clip.timelineStartMs);
-    if (start <= t && (!bestByStart || start >= safeNumber(bestByStart.timelineStartMs))) {
-      bestByStart = clip;
-    }
-  }
-  if (bestByStart) {
-    return bestByStart;
-  }
-
-  const last = ordered[ordered.length - 1];
-  if (t >= clipTimelineEndMs(last)) {
-    return last;
-  }
-
-  return ordered[0];
+  return null;
 }
 
 export function nextVideoClip(clips, clipId) {
@@ -195,11 +198,13 @@ export function trimVideoClip(clips, clipId, nextWindow, minDurationMs = 120) {
     }
 
     const oldStart = safeNumber(clip.timelineStartMs);
-    const oldEnd = clipTimelineEndMs(clip);
+    const oldTimelineDuration = clipTimelineDurationMs(clip);
+    const oldEnd = oldStart + oldTimelineDuration;
     const sourceRange = clipSourceRangeMs(clip);
     const oldSrcStart = sourceRange.startMs;
     const oldSrcEnd = sourceRange.endMs;
     const sourceDuration = Math.max(oldSrcEnd, safeNumber(clip.sourceDurationMs));
+    const oldSourceDuration = Math.max(0, oldSrcEnd - oldSrcStart);
 
     let newStart = Number.isFinite(Number(nextWindow?.startMs)) ? Number(nextWindow.startMs) : oldStart;
     let newEnd = Number.isFinite(Number(nextWindow?.endMs)) ? Number(nextWindow.endMs) : oldEnd;
@@ -211,19 +216,30 @@ export function trimVideoClip(clips, clipId, nextWindow, minDurationMs = 120) {
     const deltaEnd = newEnd - oldEnd;
 
     let newSrcStart = oldSrcStart + deltaStart;
-    let newSrcEnd = oldSrcEnd + deltaEnd;
+    if (sourceDuration > 0) {
+      const maxSrcStart = Math.max(0, sourceDuration - minDurationMs);
+      newSrcStart = Math.max(0, Math.min(maxSrcStart, newSrcStart));
+    } else {
+      newSrcStart = Math.max(0, newSrcStart);
+    }
 
-    newSrcStart = Math.max(0, Math.min(sourceDuration - minDurationMs, newSrcStart));
-    newSrcEnd = Math.max(newSrcStart + minDurationMs, Math.min(sourceDuration, newSrcEnd));
+    const desiredSourceDuration = Math.max(minDurationMs, oldSourceDuration + deltaEnd);
+    let newSourceDuration = desiredSourceDuration;
+    if (sourceDuration > 0) {
+      const maxSourceDuration = Math.max(0, sourceDuration - newSrcStart);
+      newSourceDuration = Math.min(desiredSourceDuration, maxSourceDuration);
+    }
+    newSourceDuration = Math.max(0, newSourceDuration);
 
-    const normalizedDuration = newSrcEnd - newSrcStart;
-    newEnd = newStart + normalizedDuration;
+    const newSrcEnd = newSrcStart + newSourceDuration;
+    const normalizedTimelineDuration = Math.max(minDurationMs, newEnd - newStart);
 
     return {
       ...clip,
       timelineStartMs: newStart,
       sourceStartMs: newSrcStart,
-      sourceEndMs: newSrcEnd
+      sourceEndMs: newSrcEnd,
+      timelineDurationMs: normalizedTimelineDuration
     };
   });
 }
@@ -238,7 +254,8 @@ export function splitVideoClip(clips, clipId, cutMs, minDurationMs = 120) {
     }
 
     const start = safeNumber(clip.timelineStartMs);
-    const end = clipTimelineEndMs(clip);
+    const timelineDuration = clipTimelineDurationMs(clip);
+    const end = start + timelineDuration;
     const safeCut = safeNumber(cutMs);
 
     if (safeCut <= start + minDurationMs || safeCut >= end - minDurationMs) {
@@ -247,25 +264,35 @@ export function splitVideoClip(clips, clipId, cutMs, minDurationMs = 120) {
     }
 
     const srcStart = safeNumber(clip.sourceStartMs);
-    const srcEnd = safeNumber(clip.sourceEndMs);
+    const sourceRange = clipSourceRangeMs(clip);
+    const srcEnd = sourceRange.endMs;
+    const sourceDuration = Math.max(0, srcEnd - srcStart);
 
     const offset = safeCut - start;
-    const firstSrcEnd = Math.min(srcEnd, srcStart + offset);
+    const firstTimelineDuration = offset;
+    const secondTimelineDuration = Math.max(0, timelineDuration - offset);
+    const firstSourceDuration = Math.min(sourceDuration, firstTimelineDuration);
+    const secondSourceDuration = Math.max(0, sourceDuration - firstSourceDuration);
+    const firstSrcEnd = srcStart + firstSourceDuration;
+    const secondSrcStart = firstSrcEnd;
+    const secondSrcEnd = secondSrcStart + secondSourceDuration;
 
     const first = {
       ...clip,
       id: createId("vclip"),
       sourceStartMs: srcStart,
       sourceEndMs: firstSrcEnd,
-      timelineStartMs: start
+      timelineStartMs: start,
+      timelineDurationMs: firstTimelineDuration
     };
 
     const second = {
       ...clip,
       id: createId("vclip"),
-      sourceStartMs: firstSrcEnd,
-      sourceEndMs: srcEnd,
-      timelineStartMs: safeCut
+      sourceStartMs: secondSrcStart,
+      sourceEndMs: secondSrcEnd,
+      timelineStartMs: safeCut,
+      timelineDurationMs: secondTimelineDuration
     };
 
     next.push(first, second);
@@ -320,6 +347,7 @@ export function normalizeVideoClips(rawClips) {
         sourceDurationMs: clip.sourceDurationMs,
         sourceStartMs: clip.sourceStartMs,
         sourceEndMs: clip.sourceEndMs,
+        timelineDurationMs: clip.timelineDurationMs,
         timelineStartMs: clip.timelineStartMs,
         videoLayerId: clip.videoLayerId,
         audioMuted: clip.audioMuted,
