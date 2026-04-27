@@ -28,6 +28,7 @@ import { renderAndRecordAnnotatedVideo } from "./engine/exportRenderer";
 import { shiftStrokeInTime, splitStrokeAtTime, strokeClipWindowMs, withStrokeClipWindow } from "./utils/strokeClip";
 import {
   createVideoClip,
+  clipTimelineEndMs,
   findVideoClipAtTime,
   moveVideoClip,
   moveVideoClipsToLayer,
@@ -212,6 +213,59 @@ function clipLocalRangeMs(clip, videoDurationMs = 0) {
   return { startMs, endMs: startMs + 1000 };
 }
 
+function clipLocalMsAtTimelineMs(clip, globalMs, videoDurationMs = 0) {
+  const timelineStartMs = Number(clip?.timelineStartMs) || 0;
+  const localRange = clipLocalRangeMs(clip, videoDurationMs);
+  return clamp(
+    localRange.startMs + (Math.max(0, Number(globalMs) || 0) - timelineStartMs),
+    localRange.startMs,
+    localRange.endMs
+  );
+}
+
+function resolveSameLayerCrossfade(clips, activeClip, globalMs) {
+  if (!activeClip) {
+    return null;
+  }
+
+  const t = Math.max(0, Number(globalMs) || 0);
+  const activeStartMs = Number(activeClip.timelineStartMs) || 0;
+  const activeEndMs = clipTimelineEndMs(activeClip);
+  const activeLayerId = String(activeClip.videoLayerId || "");
+
+  const outgoingClip = sortVideoClips(clips)
+    .filter((clip) => {
+      if (clip.id === activeClip.id || String(clip.videoLayerId || "") !== activeLayerId) {
+        return false;
+      }
+
+      const startMs = Number(clip.timelineStartMs) || 0;
+      const endMs = clipTimelineEndMs(clip);
+      return startMs <= activeStartMs && t >= startMs && t < endMs;
+    })
+    .sort((a, b) => (Number(b.timelineStartMs) || 0) - (Number(a.timelineStartMs) || 0))[0];
+
+  if (!outgoingClip) {
+    return null;
+  }
+
+  const outgoingStartMs = Number(outgoingClip.timelineStartMs) || 0;
+  const overlapStartMs = Math.max(activeStartMs, outgoingStartMs);
+  const overlapEndMs = Math.min(activeEndMs, clipTimelineEndMs(outgoingClip));
+  const overlapDurationMs = overlapEndMs - overlapStartMs;
+
+  if (overlapDurationMs <= 1 || t < overlapStartMs || t >= overlapEndMs) {
+    return null;
+  }
+
+  const progress = clamp((t - overlapStartMs) / overlapDurationMs, 0, 1);
+  return {
+    outgoingClip,
+    outgoingOpacity: 1 - progress,
+    activeOpacity: progress
+  };
+}
+
 function annotationTimelineDurationMs(layers, fps = 30) {
   let maxEnd = 0;
   for (const layer of layers || []) {
@@ -285,6 +339,9 @@ function App() {
 
   const [videoPath, setVideoPath] = useState("");
   const [videoUrl, setVideoUrl] = useState("");
+  const [blendVideoUrl, setBlendVideoUrl] = useState("");
+  const [blendVideoOpacity, setBlendVideoOpacity] = useState(0);
+  const [mainVideoOpacity, setMainVideoOpacity] = useState(1);
   const [videoLayers, setVideoLayers] = useState([initialVideoLayer]);
   const [activeVideoLayerId, setActiveVideoLayerId] = useState(initialVideoLayer.id);
   const [videoClips, setVideoClips] = useState([]);
@@ -309,6 +366,7 @@ function App() {
   const [timelineViewportHeight, setTimelineViewportHeight] = useState(260);
 
   const videoRef = useRef(null);
+  const blendVideoRef = useRef(null);
   const canvasRef = useRef(null);
   const videoLayersRef = useRef(videoLayers);
   const activeVideoLayerIdRef = useRef(activeVideoLayerId);
@@ -329,6 +387,10 @@ function App() {
   const lastFrameRef = useRef(-1);
   const resizeRef = useRef(null);
   const pendingVideoSeekRef = useRef(null);
+  const pendingBlendSeekRef = useRef(null);
+  const blendVideoUrlRef = useRef("");
+  const blendVideoOpacityRef = useRef(0);
+  const mainVideoOpacityRef = useRef(1);
   const gapPlaybackRef = useRef(false);
   const gapTickLastPerfRef = useRef(null);
   const currentPressureUiRef = useRef(0);
@@ -364,6 +426,90 @@ function App() {
       }
     }
   }, []);
+
+  const setCompositeOpacity = useCallback((mainOpacity, blendOpacity) => {
+    const safeMain = clamp(Number(mainOpacity), 0, 1);
+    const safeBlend = clamp(Number(blendOpacity), 0, 1);
+
+    if (Math.abs(mainVideoOpacityRef.current - safeMain) >= 0.01) {
+      mainVideoOpacityRef.current = safeMain;
+      setMainVideoOpacity(safeMain);
+    }
+    if (Math.abs(blendVideoOpacityRef.current - safeBlend) >= 0.01) {
+      blendVideoOpacityRef.current = safeBlend;
+      setBlendVideoOpacity(safeBlend);
+    }
+  }, []);
+
+  const hideBlendVideo = useCallback(() => {
+    setCompositeOpacity(1, 0);
+    pendingBlendSeekRef.current = null;
+    const blendVideo = blendVideoRef.current;
+    if (blendVideo && !blendVideo.paused) {
+      blendVideo.pause();
+    }
+  }, [setCompositeOpacity]);
+
+  const syncBlendVideo = useCallback((globalMs, activeClip, shouldPlay) => {
+    const blendVideo = blendVideoRef.current;
+    if (!blendVideo || !activeClip) {
+      hideBlendVideo();
+      return;
+    }
+
+    const crossfade = resolveSameLayerCrossfade(videoClipsRef.current, activeClip, globalMs);
+    const outgoingClip = crossfade?.outgoingClip || null;
+    if (!outgoingClip?.url) {
+      hideBlendVideo();
+      return;
+    }
+
+    setCompositeOpacity(crossfade.activeOpacity, crossfade.outgoingOpacity);
+
+    const targetLocalMs = clipLocalMsAtTimelineMs(
+      outgoingClip,
+      globalMs,
+      Number.isFinite(Number(blendVideo.duration)) ? Number(blendVideo.duration) * 1000 : 0
+    );
+    const targetSeconds = targetLocalMs / 1000;
+
+    const clearPendingBlendSeek = () => {
+      const pending = pendingBlendSeekRef.current;
+      if (
+        pending?.clipId === outgoingClip.id
+        && Math.abs((Number(pending.localMs) || 0) - targetLocalMs) <= 0.5
+      ) {
+        pendingBlendSeekRef.current = null;
+      }
+    };
+
+    pendingBlendSeekRef.current = {
+      clipId: outgoingClip.id,
+      localMs: targetLocalMs,
+      autoplay: shouldPlay
+    };
+
+    if (blendVideoUrlRef.current !== outgoingClip.url) {
+      blendVideoUrlRef.current = outgoingClip.url;
+      setBlendVideoUrl(outgoingClip.url);
+      return;
+    }
+
+    if (Math.abs((Number(blendVideo.currentTime) || 0) - targetSeconds) > 0.08) {
+      seekVideoElement(blendVideo, targetSeconds, {
+        autoplay: shouldPlay,
+        onSettled: clearPendingBlendSeek
+      });
+      return;
+    }
+
+    clearPendingBlendSeek();
+    if (shouldPlay && blendVideo.paused) {
+      blendVideo.play().catch(() => {});
+    } else if (!shouldPlay && !blendVideo.paused) {
+      blendVideo.pause();
+    }
+  }, [hideBlendVideo, setCompositeOpacity]);
 
   useEffect(() => {
     videoLayersRef.current = videoLayers;
@@ -498,6 +644,7 @@ function App() {
     if (!clip || !video) {
       setPlayheadMs(safeTargetMs);
       if (!clip) {
+        hideBlendVideo();
         pendingVideoSeekRef.current = null;
         dirtyRef.current = true;
         if (autoplay) {
@@ -571,7 +718,7 @@ function App() {
     } else {
       seekVideoElement(video, localMs / 1000, { onSettled: clearPendingSeek });
     }
-  }, [videoUrl]);
+  }, [hideBlendVideo, videoUrl]);
 
   const continueTimelineAfterVideoEnded = useCallback(() => {
     const video = videoRef.current;
@@ -706,6 +853,8 @@ function App() {
           video.volume = 1;
         }
 
+        syncBlendVideo(globalMs, activeClip, isPlaying && !video.paused);
+
         if (
           isPlaying
           && pendingVideoSeekRef.current === null
@@ -734,6 +883,7 @@ function App() {
           }
         }
       } else if (isPlaying && (video || videoClipsRef.current.length > 0)) {
+        hideBlendVideo();
         const nowPerf = performance.now();
         const previousPerf = Number(gapTickLastPerfRef.current);
         const elapsedMs = Number.isFinite(previousPerf)
@@ -790,7 +940,16 @@ function App() {
 
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, [drawOverlay, isPlaying, resolveTimelineEndMs, seekGlobalTimeMs, setPlayheadMs, videoUrl]);
+  }, [
+    drawOverlay,
+    hideBlendVideo,
+    isPlaying,
+    resolveTimelineEndMs,
+    seekGlobalTimeMs,
+    setPlayheadMs,
+    syncBlendVideo,
+    videoUrl
+  ]);
 
   useEffect(() => {
     if (!layers.some((layer) => layer.id === activeLayerId)) {
@@ -1222,6 +1381,7 @@ function App() {
         gapTickLastPerfRef.current = null;
         setIsGapPreview(false);
         video.pause();
+        blendVideoRef.current?.pause();
         setIsPlaying(false);
         return;
       }
@@ -1234,53 +1394,14 @@ function App() {
             : (Number(currentTimeRef.current) || Number(currentTime) || 0) * 1000
         );
         setPlayheadMs(playFromMs);
-        const ordered = sortVideoClips(videoClipsRef.current);
-        const targetClip = findVideoClipAtTime(ordered, playFromMs, {
-          preferredLayerId: activeVideoLayerIdRef.current,
-          layerOrderIds: (videoLayersRef.current || []).map((layer) => layer.id)
-        });
-
-        if (!targetClip) {
-          seekGlobalTimeMs(playFromMs, { autoplay: true });
-          return;
-        }
-
-        const timelineStartMs = Number(targetClip.timelineStartMs) || 0;
-        const loadedVideoDurationMs = Number.isFinite(Number(video.duration)) ? Number(video.duration) * 1000 : 0;
-        const localRange = clipLocalRangeMs(targetClip, loadedVideoDurationMs);
-        const localMs = clamp(
-          localRange.startMs + (playFromMs - timelineStartMs),
-          localRange.startMs,
-          localRange.endMs
-        );
-        const needsSourceSwap = videoUrl !== targetClip.url;
-
-        if (currentVideoClipIdRef.current !== targetClip.id) {
-          currentVideoClipIdRef.current = targetClip.id;
-          setCurrentVideoClipId(targetClip.id);
-        }
-        if (targetClip.videoLayerId && targetClip.videoLayerId !== activeVideoLayerIdRef.current) {
-          setActiveVideoLayerId(targetClip.videoLayerId);
-        }
-
-        if (needsSourceSwap) {
-          pendingVideoSeekRef.current = {
-            clipId: targetClip.id,
-            localMs,
-            autoplay: true
-          };
-          setVideoUrl(targetClip.url);
-          return;
-        }
-
-        playAfterSeek(video, localMs / 1000);
+        seekGlobalTimeMs(playFromMs, { autoplay: true });
       } else {
         video.pause();
       }
     } catch (error) {
       setStatus(`Playback error: ${error.message}`);
     }
-  }, [currentTime, isPlaying, seekGlobalTimeMs, setPlayheadMs, videoUrl]);
+  }, [currentTime, isPlaying, seekGlobalTimeMs, setPlayheadMs]);
 
   const handleSeek = useCallback((nextTime) => {
     if (videoClipsRef.current.length === 0) {
@@ -1915,9 +2036,41 @@ function App() {
                 }}
               >
                 <video
+                  ref={blendVideoRef}
+                  className="video-layer blend-video-layer"
+                  src={blendVideoUrl}
+                  muted
+                  playsInline
+                  style={{ opacity: blendVideoOpacity }}
+                  onLoadedMetadata={(event) => {
+                    const pendingSeek = pendingBlendSeekRef.current;
+                    if (!pendingSeek) {
+                      return;
+                    }
+
+                    const video = event.currentTarget;
+                    const pendingSeconds = (Number(pendingSeek.localMs) || 0) / 1000;
+                    const clearPendingBlendSeek = () => {
+                      const pending = pendingBlendSeekRef.current;
+                      if (
+                        pending?.clipId === pendingSeek.clipId
+                        && Math.abs((Number(pending.localMs) || 0) - (Number(pendingSeek.localMs) || 0)) <= 0.5
+                      ) {
+                        pendingBlendSeekRef.current = null;
+                      }
+                    };
+
+                    seekVideoElement(video, pendingSeconds, {
+                      autoplay: pendingSeek.autoplay,
+                      onSettled: clearPendingBlendSeek
+                    });
+                  }}
+                />
+                <video
                   ref={videoRef}
                   className={`video-layer ${isGapPreview ? "gap-hidden" : ""}`}
                   src={videoUrl}
+                  style={{ opacity: isGapPreview ? 0 : mainVideoOpacity }}
                   onPlay={() => setIsPlaying(true)}
                   onPause={() => {
                     if (!gapPlaybackRef.current) {

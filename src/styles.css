@@ -277,6 +277,10 @@ button.danger {
   object-fit: contain;
 }
 
+.blend-video-layer {
+  pointer-events: none;
+}
+
 .video-layer.gap-hidden {
   opacity: 0;
 }
