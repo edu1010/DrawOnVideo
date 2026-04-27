@@ -495,6 +495,7 @@ function App() {
           setIsGapPreview(true);
           setIsPlaying(false);
         }
+        currentVideoClipIdRef.current = null;
         setCurrentVideoClipId(null);
         if (video) {
           video.pause();
@@ -523,12 +524,14 @@ function App() {
         localMs,
         autoplay
       };
+      currentVideoClipIdRef.current = clip.id;
       setCurrentVideoClipId(clip.id);
       setVideoUrl(clip.url);
       return;
     }
 
     if (currentVideoClipIdRef.current !== clip.id) {
+      currentVideoClipIdRef.current = clip.id;
       setCurrentVideoClipId(clip.id);
     }
     if (clip.videoLayerId && clip.videoLayerId !== activeVideoLayerIdRef.current) {
@@ -573,6 +576,7 @@ function App() {
       }
 
       setPlayheadMs(nextGlobalMs);
+      currentVideoClipIdRef.current = null;
       setCurrentVideoClipId(null);
       setIsGapPreview(true);
       gapPlaybackRef.current = true;
@@ -617,7 +621,20 @@ function App() {
     const tick = () => {
       const video = videoRef.current;
 
-      if (video && videoUrl && !gapPlaybackRef.current) {
+      if (pendingVideoSeekRef.current !== null) {
+        const timelineNow = Math.max(0, Number(currentTimeRef.current) || 0);
+        const frame = Math.round(timelineNow * (videoMetaRef.current.fps || 30));
+        const shouldRender =
+          dirtyRef.current ||
+          activeStrokeRef.current !== null ||
+          frame !== lastFrameRef.current;
+
+        if (shouldRender) {
+          drawOverlay(timelineNow);
+          dirtyRef.current = false;
+          lastFrameRef.current = frame;
+        }
+      } else if (video && videoUrl && !gapPlaybackRef.current) {
         const orderedClips = sortVideoClips(videoClipsRef.current);
         const activeClip = orderedClips.find((clip) => clip.id === currentVideoClipIdRef.current) || null;
 
@@ -995,6 +1012,7 @@ function App() {
       setVideoLayers([baseVideoLayer]);
       setActiveVideoLayerId(baseVideoLayer.id);
       setVideoClips([initialClip]);
+      currentVideoClipIdRef.current = initialClip.id;
       setCurrentVideoClipId(initialClip.id);
       setVideoMeta(mergedMeta);
       setSelectedClips([]);
@@ -1141,6 +1159,7 @@ function App() {
       setVideoLayers(normalizedVideoLayers);
       setActiveVideoLayerId(firstClip?.videoLayerId || normalizedVideoLayers[0]?.id || null);
       setVideoClips(validClips);
+      currentVideoClipIdRef.current = firstClip?.id || null;
       setCurrentVideoClipId(firstClip?.id || null);
       setVideoMeta(nextMeta);
       setLayers(nextLayers);
@@ -1209,6 +1228,7 @@ function App() {
         const needsSourceSwap = videoUrl !== targetClip.url;
 
         if (currentVideoClipIdRef.current !== targetClip.id) {
+          currentVideoClipIdRef.current = targetClip.id;
           setCurrentVideoClipId(targetClip.id);
         }
         if (targetClip.videoLayerId && targetClip.videoLayerId !== activeVideoLayerIdRef.current) {
@@ -1603,6 +1623,7 @@ function App() {
   useEffect(() => {
     const ordered = sortVideoClips(videoClips);
     if (ordered.length === 0) {
+      currentVideoClipIdRef.current = null;
       setCurrentVideoClipId(null);
       setVideoUrl("");
       setVideoPath("");
@@ -1613,6 +1634,7 @@ function App() {
     const exists = ordered.some((clip) => clip.id === currentVideoClipIdRef.current);
     if (!exists) {
       const first = ordered[0];
+      currentVideoClipIdRef.current = first.id;
       setCurrentVideoClipId(first.id);
       setVideoUrl(first.url);
       setVideoPath(first.path);
@@ -1875,6 +1897,7 @@ function App() {
                     const pendingSeek = pendingVideoSeekRef.current;
                     if (pendingSeek) {
                       if (pendingSeek.clipId && pendingSeek.clipId !== currentVideoClipIdRef.current) {
+                        currentVideoClipIdRef.current = pendingSeek.clipId;
                         setCurrentVideoClipId(pendingSeek.clipId);
                       }
                       const pendingSeconds = (Number(pendingSeek.localMs) || 0) / 1000;
