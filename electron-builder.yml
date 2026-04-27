@@ -1,0 +1,25 @@
+appId: com.edu1010.drawonvideo
+productName: DrawOnVideo
+
+directories:
+  output: release
+
+files:
+  - "dist/**/*"
+  - "electron/**/*"
+  - "package.json"
+  - "LICENSE"
+  - "NOTICE"
+  - "THIRD_PARTY_NOTICES"
+
+asar: true
+npmRebuild: false
+
+win:
+  signAndEditExecutable: false
+  verifyUpdateCodeSignature: false
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: "${productName}-${version}-Setup-${arch}.${ext}"
