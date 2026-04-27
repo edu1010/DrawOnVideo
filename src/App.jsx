@@ -277,6 +277,8 @@ function App() {
   const lastFrameRef = useRef(-1);
   const resizeRef = useRef(null);
   const pendingVideoSeekRef = useRef(null);
+  const gapPlaybackRef = useRef(false);
+  const gapTickLastPerfRef = useRef(null);
 
   const setPlayheadMs = useCallback((nextMs) => {
     const safeMs = Math.max(0, Number(nextMs) || 0);
@@ -284,6 +286,14 @@ function App() {
     const safeSeconds = safeMs / 1000;
     currentTimeRef.current = safeSeconds;
     setCurrentTime(safeSeconds);
+  }, []);
+
+  const resolveTimelineEndMs = useCallback(() => {
+    const clipMs = totalTimelineDurationMs(videoClipsRef.current);
+    const fps = Number(videoMetaRef.current.fps) || DEFAULT_VIDEO_META.fps;
+    const drawMs = annotationTimelineDurationMs(layersRef.current, fps);
+    const metaMs = Math.max(0, (Number(videoMetaRef.current.duration) || 0) * 1000);
+    return Math.max(clipMs, drawMs, metaMs);
   }, []);
 
   useEffect(() => {
@@ -426,6 +436,12 @@ function App() {
           video.pause();
         }
         if (autoplay) {
+          gapPlaybackRef.current = true;
+          gapTickLastPerfRef.current = performance.now();
+          setIsPlaying(true);
+        } else {
+          gapPlaybackRef.current = false;
+          gapTickLastPerfRef.current = null;
           setIsPlaying(false);
         }
       }
@@ -441,6 +457,8 @@ function App() {
 
     setPlayheadMs(safeGlobalMs);
     dirtyRef.current = true;
+    gapPlaybackRef.current = false;
+    gapTickLastPerfRef.current = null;
 
     const needsSourceSwap = videoUrl !== clip.url;
     if (needsSourceSwap) {
@@ -561,16 +579,59 @@ function App() {
             if (nextGlobalMs > globalMs + 0.1 && nextGlobalMs < timelineEndMs - 0.1) {
               seekGlobalTimeMs(nextGlobalMs, { autoplay: true });
             } else {
+              gapPlaybackRef.current = false;
+              gapTickLastPerfRef.current = null;
               video.pause();
             }
           }
         }
-      } else if (dirtyRef.current) {
-        const canvas = canvasRef.current;
-        const ctx = canvas?.getContext("2d");
-        if (canvas && ctx) {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
+      } else if (isPlaying && (video || videoClipsRef.current.length > 0)) {
+        const nowPerf = performance.now();
+        const previousPerf = Number(gapTickLastPerfRef.current);
+        const elapsedMs = Number.isFinite(previousPerf)
+          ? clamp(nowPerf - previousPerf, 0, 120)
+          : (1000 / Math.max(videoMetaRef.current.fps || 30, 1));
+        gapTickLastPerfRef.current = nowPerf;
+        gapPlaybackRef.current = true;
+
+        const timelineEndMs = resolveTimelineEndMs();
+        const nextGlobalMs = timelineEndMs > 0
+          ? Math.min(timelineEndMs, Math.max(0, playheadMsRef.current + elapsedMs))
+          : Math.max(0, playheadMsRef.current + elapsedMs);
+        const nextSeconds = nextGlobalMs / 1000;
+        const frame = Math.round(nextSeconds * (videoMetaRef.current.fps || 30));
+        const shouldRender =
+          dirtyRef.current ||
+          activeStrokeRef.current !== null ||
+          frame !== lastFrameRef.current;
+
+        if (Math.abs(playheadMsRef.current - nextGlobalMs) >= 0.1) {
+          setPlayheadMs(nextGlobalMs);
         }
+
+        if (shouldRender) {
+          drawOverlay(nextSeconds);
+          dirtyRef.current = false;
+          lastFrameRef.current = frame;
+        }
+
+        const orderedClips = sortVideoClips(videoClipsRef.current);
+        const visibleClip = findVideoClipAtTime(orderedClips, nextGlobalMs, {
+          preferredLayerId: activeVideoLayerIdRef.current,
+          layerOrderIds: (videoLayersRef.current || []).map((layer) => layer.id)
+        });
+
+        if (visibleClip && pendingVideoSeekRef.current === null) {
+          gapPlaybackRef.current = false;
+          gapTickLastPerfRef.current = null;
+          seekGlobalTimeMs(nextGlobalMs, { autoplay: true });
+        } else if (timelineEndMs > 0 && nextGlobalMs >= timelineEndMs - 0.5) {
+          gapPlaybackRef.current = false;
+          gapTickLastPerfRef.current = null;
+          setIsPlaying(false);
+        }
+      } else if (dirtyRef.current) {
+        drawOverlay(Math.max(0, Number(currentTimeRef.current) || 0));
         dirtyRef.current = false;
       }
 
@@ -579,7 +640,7 @@ function App() {
 
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, [drawOverlay, isPlaying, seekGlobalTimeMs, setPlayheadMs, videoUrl]);
+  }, [drawOverlay, isPlaying, resolveTimelineEndMs, seekGlobalTimeMs, setPlayheadMs, videoUrl]);
 
   useEffect(() => {
     if (!layers.some((layer) => layer.id === activeLayerId)) {
@@ -991,6 +1052,14 @@ function App() {
     }
 
     try {
+      if (isPlaying) {
+        gapPlaybackRef.current = false;
+        gapTickLastPerfRef.current = null;
+        video.pause();
+        setIsPlaying(false);
+        return;
+      }
+
       if (video.paused) {
         const playFromMs = Math.max(
           0,
@@ -1044,7 +1113,7 @@ function App() {
     } catch (error) {
       setStatus(`Playback error: ${error.message}`);
     }
-  }, [currentTime, seekGlobalTimeMs, setPlayheadMs, videoUrl]);
+  }, [currentTime, isPlaying, seekGlobalTimeMs, setPlayheadMs, videoUrl]);
 
   const handleSeek = useCallback((nextTime) => {
     if (videoClipsRef.current.length === 0) {
@@ -1668,7 +1737,11 @@ function App() {
                   className="video-layer"
                   src={videoUrl}
                   onPlay={() => setIsPlaying(true)}
-                  onPause={() => setIsPlaying(false)}
+                  onPause={() => {
+                    if (!gapPlaybackRef.current) {
+                      setIsPlaying(false);
+                    }
+                  }}
                   onEnded={() => setIsPlaying(false)}
                   onLoadedMetadata={(event) => {
                     const video = event.currentTarget;
