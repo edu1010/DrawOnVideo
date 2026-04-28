@@ -562,6 +562,7 @@ function App() {
   const [rightPanelWidth, setRightPanelWidth] = useState(300);
   const [bottomDockHeight, setBottomDockHeight] = useState(360);
   const [timelineViewportHeight, setTimelineViewportHeight] = useState(260);
+  const [previewStageSize, setPreviewStageSize] = useState(null);
   const [isPreviewDetached, setIsPreviewDetached] = useState(false);
   const [previewPortalNode, setPreviewPortalNode] = useState(null);
 
@@ -569,6 +570,7 @@ function App() {
   const blendVideoRef = useRef(null);
   const canvasRef = useRef(null);
   const appShellRef = useRef(null);
+  const stageWrapperRef = useRef(null);
   const topDockZoneRef = useRef(null);
   const leftDockZoneRef = useRef(null);
   const rightDockZoneRef = useRef(null);
@@ -689,6 +691,68 @@ function App() {
       measureSnapZoneRects();
     });
   }, [measureSnapZoneRects]);
+
+  const measurePreviewStageSize = useCallback(() => {
+    const wrapper = stageWrapperRef.current;
+    if (!wrapper || isPreviewDetached) {
+      setPreviewStageSize(null);
+      return;
+    }
+
+    const rect = wrapper.getBoundingClientRect();
+    const style = window.getComputedStyle(wrapper);
+    const horizontalPadding = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+    const verticalPadding = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+    const availableWidth = Math.max(1, rect.width - horizontalPadding);
+    const availableHeight = Math.max(1, rect.height - verticalPadding);
+    const aspect = Math.max(
+      0.01,
+      (Number(videoMetaRef.current.width) || DEFAULT_VIDEO_META.width)
+      / (Number(videoMetaRef.current.height) || DEFAULT_VIDEO_META.height)
+    );
+
+    let width = Math.min(availableWidth, availableHeight * aspect);
+    let height = width / aspect;
+    if (height > availableHeight) {
+      height = availableHeight;
+      width = height * aspect;
+    }
+
+    setPreviewStageSize((prev) => {
+      const next = {
+        width: Math.round(width),
+        height: Math.round(height)
+      };
+      if (prev && Math.abs(prev.width - next.width) < 1 && Math.abs(prev.height - next.height) < 1) {
+        return prev;
+      }
+      return next;
+    });
+  }, [isPreviewDetached]);
+
+  useEffect(() => {
+    measurePreviewStageSize();
+  }, [
+    bottomDockHeight,
+    leftPanelWidth,
+    measurePreviewStageSize,
+    rightPanelWidth,
+    videoMeta.height,
+    videoMeta.width
+  ]);
+
+  useEffect(() => {
+    const wrapper = stageWrapperRef.current;
+    if (!wrapper || typeof ResizeObserver === "undefined") {
+      return undefined;
+    }
+
+    const observer = new ResizeObserver(() => {
+      measurePreviewStageSize();
+    });
+    observer.observe(wrapper);
+    return () => observer.disconnect();
+  }, [measurePreviewStageSize]);
 
   useEffect(() => {
     if (!isPanelDragging) {
@@ -2752,12 +2816,24 @@ function App() {
   const hasVideo = videoClips.length > 0;
   const projectName = fileNameFromPath(videoPath);
   const safePreviewScale = normalizePreviewScale(previewScale);
+  const previewStageStyle = {
+    aspectRatio: `${videoMeta.width || 16}/${videoMeta.height || 9}`
+  };
+  if (
+    previewStageSize
+    && Number.isFinite(previewStageSize.width)
+    && Number.isFinite(previewStageSize.height)
+    && previewStageSize.width > 0
+    && previewStageSize.height > 0
+  ) {
+    previewStageStyle.width = `${previewStageSize.width}px`;
+    previewStageStyle.height = `${previewStageSize.height}px`;
+  }
+
   const previewStage = (
     <div
       className="video-stage"
-      style={{
-        aspectRatio: `${videoMeta.width || 16}/${videoMeta.height || 9}`
-      }}
+      style={previewStageStyle}
     >
       <div
         className={`preview-resolution-shell ${safePreviewScale < 0.999 ? "is-scaled" : ""}`}
@@ -3216,7 +3292,7 @@ function App() {
           />
 
           <section className="stage-section">
-            <div className="stage-wrapper">
+            <div ref={stageWrapperRef} className="stage-wrapper">
               {hasVideo ? (
                 isPreviewDetached ? (
                   <div className="empty-stage detached-stage">
