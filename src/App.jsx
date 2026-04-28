@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import TopBar from "./components/TopBar";
 import Toolbar from "./components/Toolbar";
 import LayersPanel from "./components/LayersPanel";
@@ -49,6 +50,68 @@ import {
 } from "./utils/videoLayerOps";
 
 const desktopAPI = window.desktopAPI;
+const PREVIEW_SCALES = [1, 0.75, 0.5, 0.25];
+
+function normalizePreviewScale(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return 1;
+  }
+
+  const candidate = PREVIEW_SCALES.find((scale) => Math.abs(scale - numeric) < 0.0001);
+  return candidate ?? 1;
+}
+
+function copyDocumentStyles(targetDoc) {
+  if (!targetDoc?.head) {
+    return;
+  }
+
+  targetDoc.querySelectorAll("style[data-preview-clone],link[data-preview-clone]").forEach((node) => {
+    node.remove();
+  });
+
+  const styleNodes = document.querySelectorAll("link[rel='stylesheet'], style");
+  styleNodes.forEach((node) => {
+    const clone = node.cloneNode(true);
+    clone.setAttribute("data-preview-clone", "1");
+    targetDoc.head.appendChild(clone);
+  });
+}
+
+function readWindowRect(win) {
+  if (!win) {
+    return null;
+  }
+
+  const x = Number(win.screenX);
+  const y = Number(win.screenY);
+  const width = Number(win.outerWidth);
+  const height = Number(win.outerHeight);
+
+  if (![x, y, width, height].every((value) => Number.isFinite(value))) {
+    return null;
+  }
+
+  return {
+    left: x,
+    top: y,
+    right: x + Math.max(0, width),
+    bottom: y + Math.max(0, height),
+    width: Math.max(0, width),
+    height: Math.max(0, height)
+  };
+}
+
+function rectDistance(a, b) {
+  if (!a || !b) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const dx = Math.max(0, Math.max(a.left - b.right, b.left - a.right));
+  const dy = Math.max(0, Math.max(a.top - b.bottom, b.top - a.bottom));
+  return Math.hypot(dx, dy);
+}
 
 // Stack rationale:
 // Electron + React + Canvas gives a strong desktop MVP balance:
@@ -262,7 +325,7 @@ function resolveSameLayerCrossfade(clips, activeClip, globalMs) {
   return {
     outgoingClip,
     outgoingOpacity: 1 - progress,
-    activeOpacity: 1
+    activeOpacity: progress
   };
 }
 
@@ -397,6 +460,7 @@ function App() {
   const [videoClips, setVideoClips] = useState([]);
   const [currentVideoClipId, setCurrentVideoClipId] = useState(null);
   const [videoMeta, setVideoMeta] = useState(DEFAULT_VIDEO_META);
+  const [previewScale, setPreviewScale] = useState(1);
   const [layers, setLayers] = useState([initialLayer]);
   const [activeLayerId, setActiveLayerId] = useState(initialLayer.id);
   const [currentTime, setCurrentTime] = useState(0);
@@ -414,10 +478,16 @@ function App() {
   const [leftPanelWidth, setLeftPanelWidth] = useState(270);
   const [rightPanelWidth, setRightPanelWidth] = useState(300);
   const [timelineViewportHeight, setTimelineViewportHeight] = useState(260);
+  const [isPreviewDetached, setIsPreviewDetached] = useState(false);
+  const [previewPortalNode, setPreviewPortalNode] = useState(null);
 
   const videoRef = useRef(null);
   const blendVideoRef = useRef(null);
   const canvasRef = useRef(null);
+  const previewWindowRef = useRef(null);
+  const previewPopoutOpenedAtRef = useRef(null);
+  const previewPopoutMovedRef = useRef(false);
+  const previewPopoutNearSinceRef = useRef(null);
   const videoLayersRef = useRef(videoLayers);
   const activeVideoLayerIdRef = useRef(activeVideoLayerId);
   const videoClipsRef = useRef(videoClips);
@@ -425,6 +495,7 @@ function App() {
   const layersRef = useRef(layers);
   const activeLayerIdRef = useRef(activeLayerId);
   const videoMetaRef = useRef(videoMeta);
+  const previewScaleRef = useRef(previewScale);
   const brushRef = useRef(brush);
   const onionSkinRef = useRef(onionSkin);
   const currentTimeRef = useRef(0);
@@ -479,6 +550,86 @@ function App() {
       }
     }
   }, []);
+
+  const dockPreview = useCallback((options = {}) => {
+    const { closeWindow = true } = options;
+    const previewWindow = previewWindowRef.current;
+    if (previewWindow && closeWindow && !previewWindow.closed) {
+      previewWindow.close();
+    }
+
+    previewWindowRef.current = null;
+    previewPopoutOpenedAtRef.current = null;
+    previewPopoutMovedRef.current = false;
+    previewPopoutNearSinceRef.current = null;
+    setPreviewPortalNode(null);
+    setIsPreviewDetached(false);
+  }, []);
+
+  const undockPreview = useCallback(() => {
+    if (videoClipsRef.current.length === 0) {
+      return;
+    }
+
+    const existingWindow = previewWindowRef.current;
+    if (existingWindow && !existingWindow.closed) {
+      existingWindow.focus();
+      setIsPreviewDetached(true);
+      return;
+    }
+
+    const sourceWidth = Math.max(640, Math.round((videoMetaRef.current.width || DEFAULT_VIDEO_META.width) * 0.85));
+    const sourceHeight = Math.max(360, Math.round((videoMetaRef.current.height || DEFAULT_VIDEO_META.height) * 0.85));
+    const previewWindow = window.open(
+      "",
+      "drawonvideo-preview",
+      `popup=yes,width=${sourceWidth},height=${sourceHeight}`
+    );
+
+    if (!previewWindow) {
+      setStatus("Preview pop-out blocked by the system/browser.");
+      return;
+    }
+
+    const doc = previewWindow.document;
+    doc.title = "DrawOnVideo - Preview";
+    doc.body.innerHTML = "";
+    copyDocumentStyles(doc);
+    doc.body.style.margin = "0";
+    doc.body.style.background = "#000";
+    doc.body.style.overflow = "hidden";
+
+    const host = doc.createElement("div");
+    host.className = "preview-popout-root";
+    host.style.width = "100vw";
+    host.style.height = "100vh";
+    doc.body.appendChild(host);
+
+    previewWindowRef.current = previewWindow;
+    previewPopoutOpenedAtRef.current = performance.now();
+    previewPopoutMovedRef.current = false;
+    previewPopoutNearSinceRef.current = null;
+    setPreviewPortalNode(host);
+    setIsPreviewDetached(true);
+    previewWindow.focus();
+
+    const onPreviewClosed = () => {
+      if (previewWindowRef.current === previewWindow) {
+        dockPreview({ closeWindow: false });
+      }
+    };
+
+    previewWindow.addEventListener("beforeunload", onPreviewClosed, { once: true });
+  }, [dockPreview]);
+
+  const handleTogglePreviewDetach = useCallback(() => {
+    if (isPreviewDetached) {
+      dockPreview();
+      return;
+    }
+
+    undockPreview();
+  }, [dockPreview, isPreviewDetached, undockPreview]);
 
   const setCompositeOpacity = useCallback((mainOpacity, blendOpacity) => {
     const safeMain = clamp(Number(mainOpacity), 0, 1);
@@ -600,6 +751,81 @@ function App() {
   }, [videoMeta]);
 
   useEffect(() => {
+    previewScaleRef.current = normalizePreviewScale(previewScale);
+    dirtyRef.current = true;
+  }, [previewScale]);
+
+  useEffect(() => {
+    if (isPreviewDetached && videoClips.length === 0) {
+      dockPreview();
+    }
+  }, [dockPreview, isPreviewDetached, videoClips.length]);
+
+  useEffect(() => {
+    if (!isPreviewDetached) {
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => {
+      const previewWindow = previewWindowRef.current;
+      if (!previewWindow) {
+        return;
+      }
+
+      if (previewWindow.closed) {
+        dockPreview({ closeWindow: false });
+        return;
+      }
+
+      const mainRect = readWindowRect(window);
+      const previewRect = readWindowRect(previewWindow);
+      if (!mainRect || !previewRect) {
+        return;
+      }
+
+      const now = performance.now();
+      const openedAt = Number(previewPopoutOpenedAtRef.current);
+      if (Number.isFinite(openedAt) && now - openedAt < 1500) {
+        return;
+      }
+
+      const nearDistance = rectDistance(mainRect, previewRect);
+      const farThresholdPx = 200;
+      if (!previewPopoutMovedRef.current) {
+        if (nearDistance >= farThresholdPx) {
+          previewPopoutMovedRef.current = true;
+          previewPopoutNearSinceRef.current = null;
+        }
+        return;
+      }
+
+      const nearThresholdPx = 28;
+      if (nearDistance > nearThresholdPx) {
+        previewPopoutNearSinceRef.current = null;
+        return;
+      }
+
+      if (!Number.isFinite(Number(previewPopoutNearSinceRef.current))) {
+        previewPopoutNearSinceRef.current = now;
+        return;
+      }
+
+      if (now - previewPopoutNearSinceRef.current >= 280) {
+        dockPreview();
+      }
+    }, 120);
+
+    return () => window.clearInterval(intervalId);
+  }, [dockPreview, isPreviewDetached]);
+
+  useEffect(() => () => {
+    const previewWindow = previewWindowRef.current;
+    if (previewWindow && !previewWindow.closed) {
+      previewWindow.close();
+    }
+  }, []);
+
+  useEffect(() => {
     brushRef.current = brush;
   }, [brush]);
 
@@ -618,11 +844,14 @@ function App() {
       return;
     }
 
-    canvas.width = Math.max(1, Math.round(videoMeta.width || DEFAULT_VIDEO_META.width));
-    canvas.height = Math.max(1, Math.round(videoMeta.height || DEFAULT_VIDEO_META.height));
+    const safeScale = normalizePreviewScale(previewScale);
+    const sourceWidth = Math.max(1, Math.round(videoMeta.width || DEFAULT_VIDEO_META.width));
+    const sourceHeight = Math.max(1, Math.round(videoMeta.height || DEFAULT_VIDEO_META.height));
+    canvas.width = Math.max(1, Math.round(sourceWidth * safeScale));
+    canvas.height = Math.max(1, Math.round(sourceHeight * safeScale));
     renderStateRef.current = createRenderState();
     dirtyRef.current = true;
-  }, [videoMeta.width, videoMeta.height]);
+  }, [previewScale, videoMeta.width, videoMeta.height]);
 
   useEffect(() => {
     const ordered = sortVideoClips(videoClips);
@@ -843,7 +1072,8 @@ function App() {
       fps: videoMetaRef.current.fps,
       renderState: renderStateRef.current,
       activeStroke: activeStrokeRef.current,
-      onionSkin: onionSkinRef.current
+      onionSkin: onionSkinRef.current,
+      coordinateScale: previewScaleRef.current
     });
   }, []);
 
@@ -873,7 +1103,19 @@ function App() {
         const activeClip = orderedClips.find((clip) => clip.id === currentVideoClipIdRef.current) || null;
         const videoLocalMs = (Number(video.currentTime) || 0) * 1000;
         const derivedGlobalMs = activeClip
-          ? (Number(activeClip.timelineStartMs) || 0) + (videoLocalMs - (Number(activeClip.sourceStartMs) || 0))
+          ? (() => {
+            const activeClipDurationMs = Number.isFinite(Number(activeClip.sourceDurationMs))
+              ? Number(activeClip.sourceDurationMs)
+              : 0;
+            const activeLocalRange = clipLocalRangeMs(activeClip, activeClipDurationMs);
+            const clampedLocalMs = clamp(
+              videoLocalMs,
+              activeLocalRange.startMs,
+              activeLocalRange.endMs
+            );
+            return (Number(activeClip.timelineStartMs) || 0)
+              + (clampedLocalMs - activeLocalRange.startMs);
+          })()
           : videoLocalMs;
         let globalMs = derivedGlobalMs;
 
@@ -1039,12 +1281,14 @@ function App() {
       return null;
     }
 
-    const x = ((event.clientX - rect.left) / rect.width) * canvas.width;
-    const y = ((event.clientY - rect.top) / rect.height) * canvas.height;
+    const logicalWidth = Math.max(1, Math.round(videoMetaRef.current.width || DEFAULT_VIDEO_META.width));
+    const logicalHeight = Math.max(1, Math.round(videoMetaRef.current.height || DEFAULT_VIDEO_META.height));
+    const x = ((event.clientX - rect.left) / rect.width) * logicalWidth;
+    const y = ((event.clientY - rect.top) / rect.height) * logicalHeight;
 
     return {
-      x: clamp(x, 0, canvas.width),
-      y: clamp(y, 0, canvas.height)
+      x: clamp(x, 0, logicalWidth),
+      y: clamp(y, 0, logicalHeight)
     };
   }, []);
 
@@ -2113,6 +2357,178 @@ function App() {
 
   const hasVideo = videoClips.length > 0;
   const projectName = fileNameFromPath(videoPath);
+  const safePreviewScale = normalizePreviewScale(previewScale);
+  const previewStage = (
+    <div
+      className="video-stage"
+      style={{
+        aspectRatio: `${videoMeta.width || 16}/${videoMeta.height || 9}`
+      }}
+    >
+      <div
+        className={`preview-resolution-shell ${safePreviewScale < 0.999 ? "is-scaled" : ""}`}
+        style={{ "--preview-scale": safePreviewScale }}
+      >
+        <video
+          ref={blendVideoRef}
+          className="video-layer blend-video-layer"
+          src={blendVideoUrl}
+          muted
+          playsInline
+          style={{ opacity: blendVideoOpacity }}
+          onLoadedMetadata={(event) => {
+            const pendingSeek = pendingBlendSeekRef.current;
+            if (!pendingSeek) {
+              return;
+            }
+
+            const video = event.currentTarget;
+            const pendingSeconds = (Number(pendingSeek.localMs) || 0) / 1000;
+            const clearPendingBlendSeek = () => {
+              const pending = pendingBlendSeekRef.current;
+              if (
+                pending?.clipId === pendingSeek.clipId
+                && Math.abs((Number(pending.localMs) || 0) - (Number(pendingSeek.localMs) || 0)) <= 0.5
+              ) {
+                pendingBlendSeekRef.current = null;
+              }
+            };
+
+            seekVideoElement(video, pendingSeconds, {
+              autoplay: pendingSeek.autoplay,
+              onSettled: clearPendingBlendSeek
+            });
+          }}
+        />
+        <video
+          ref={videoRef}
+          className={`video-layer ${isGapPreview ? "gap-hidden" : ""}`}
+          src={videoUrl}
+          style={{ opacity: isGapPreview ? 0 : mainVideoOpacity }}
+          onPlay={() => {
+            playbackTickLastPerfRef.current = performance.now();
+            isPlayingRef.current = true;
+            setIsPlaying(true);
+          }}
+          onPause={() => {
+            if (!gapPlaybackRef.current) {
+              playbackTickLastPerfRef.current = null;
+              isPlayingRef.current = false;
+              setIsPlaying(false);
+            }
+          }}
+          onEnded={continueTimelineAfterVideoEnded}
+          onLoadedMetadata={(event) => {
+            const video = event.currentTarget;
+            const pendingSeek = pendingVideoSeekRef.current;
+            if (pendingSeek) {
+              if (pendingSeek.clipId && pendingSeek.clipId !== currentVideoClipIdRef.current) {
+                currentVideoClipIdRef.current = pendingSeek.clipId;
+                setCurrentVideoClipId(pendingSeek.clipId);
+              }
+              const pendingSeconds = (Number(pendingSeek.localMs) || 0) / 1000;
+              const clearPendingSeek = () => {
+                const pending = pendingVideoSeekRef.current;
+                if (
+                  pending?.clipId === pendingSeek.clipId
+                  && Math.abs((Number(pending.localMs) || 0) - (Number(pendingSeek.localMs) || 0)) <= 0.5
+                ) {
+                  pendingVideoSeekRef.current = null;
+                }
+              };
+              if (pendingSeek.autoplay) {
+                playAfterSeek(video, pendingSeconds, { onSettled: clearPendingSeek });
+              } else {
+                seekVideoElement(video, pendingSeconds, { onSettled: clearPendingSeek });
+              }
+            }
+
+            const loadedDurationSeconds = Number(video.duration);
+            const loadedDurationMs = Number.isFinite(loadedDurationSeconds) && loadedDurationSeconds > 0
+              ? loadedDurationSeconds * 1000
+              : null;
+            const loadedWidth = Number(video.videoWidth) || 0;
+            const loadedHeight = Number(video.videoHeight) || 0;
+            let activeClipId = currentVideoClipIdRef.current;
+            if (!activeClipId) {
+              const fallbackClip = (videoClipsRef.current || []).find(
+                (clip) => clip.url && clip.url === videoUrl
+              );
+              activeClipId = fallbackClip?.id || null;
+            }
+
+            if (activeClipId && loadedDurationMs) {
+              setVideoClips((prev) => {
+                let changed = false;
+                const next = (prev || []).map((clip) => {
+                  if (clip.id !== activeClipId) {
+                    return clip;
+                  }
+
+                  const currentStart = Number(clip.sourceStartMs) || 0;
+                  const currentEnd = Number(clip.sourceEndMs);
+                  const hasValidRange = Number.isFinite(currentEnd) && currentEnd >= currentStart;
+                  const currentDuration = Number(clip.sourceDurationMs) || 0;
+
+                  const patch = {};
+                  if (Math.abs(currentDuration - loadedDurationMs) > 1) {
+                    patch.sourceDurationMs = loadedDurationMs;
+                  }
+                  if (!hasValidRange) {
+                    patch.sourceStartMs = currentStart;
+                    patch.sourceEndMs = currentStart + loadedDurationMs;
+                  } else if (currentEnd > loadedDurationMs && currentStart <= 0) {
+                    patch.sourceEndMs = loadedDurationMs;
+                  }
+                  if (loadedWidth > 0 && loadedWidth !== Number(clip.width)) {
+                    patch.width = loadedWidth;
+                  }
+                  if (loadedHeight > 0 && loadedHeight !== Number(clip.height)) {
+                    patch.height = loadedHeight;
+                  }
+
+                  if (Object.keys(patch).length === 0) {
+                    return clip;
+                  }
+
+                  changed = true;
+                  return { ...clip, ...patch };
+                });
+
+                return changed ? next : prev;
+              });
+            }
+
+            const clipTimelineDurationSeconds = totalTimelineDurationMs(videoClipsRef.current) / 1000;
+            const nextMeta = {
+              width: loadedWidth || videoMetaRef.current.width,
+              height: loadedHeight || videoMetaRef.current.height,
+              fps: Number(videoMetaRef.current.fps) || DEFAULT_VIDEO_META.fps,
+              duration: clipTimelineDurationSeconds > 0
+                ? clipTimelineDurationSeconds
+                : (loadedDurationMs ? loadedDurationMs / 1000 : (Number(videoMetaRef.current.duration) || DEFAULT_VIDEO_META.duration))
+            };
+            setVideoMeta(nextMeta);
+            videoMetaRef.current = nextMeta;
+            dirtyRef.current = true;
+          }}
+          onError={() => {
+            const detail = mediaErrorMessage(videoRef.current?.error);
+            setStatus(`Video failed to load: ${detail}`);
+          }}
+        />
+
+        <canvas
+          ref={canvasRef}
+          className="draw-layer"
+          onPointerDown={handleCanvasPointerDown}
+          onPointerMove={handleCanvasPointerMove}
+          onPointerUp={handleCanvasPointerUp}
+          onPointerCancel={handleCanvasPointerCancel}
+        />
+      </div>
+    </div>
+  );
 
   return (
     <div className="app-shell">
@@ -2120,11 +2536,15 @@ function App() {
         projectName={projectName}
         status={status}
         exportState={exportState}
+        previewScale={safePreviewScale}
+        isPreviewDetached={isPreviewDetached}
         onOpenVideo={handleOpenVideo}
         onAddVideo={handleAddVideo}
         onSaveProject={handleSaveProject}
         onLoadProject={handleLoadProject}
         onExportVideo={handleOpenExportDialog}
+        onPreviewScaleChange={(nextScale) => setPreviewScale(normalizePreviewScale(nextScale))}
+        onTogglePreviewDetach={handleTogglePreviewDetach}
         disabled={!hasVideo}
         canAddVideo={hasVideo}
       />
@@ -2158,170 +2578,12 @@ function App() {
         <section className="stage-section">
           <div className="stage-wrapper">
             {hasVideo ? (
-              <div
-                className="video-stage"
-                style={{
-                  aspectRatio: `${videoMeta.width || 16}/${videoMeta.height || 9}`
-                }}
-              >
-                <video
-                  ref={blendVideoRef}
-                  className="video-layer blend-video-layer"
-                  src={blendVideoUrl}
-                  muted
-                  playsInline
-                  style={{ opacity: blendVideoOpacity }}
-                  onLoadedMetadata={(event) => {
-                    const pendingSeek = pendingBlendSeekRef.current;
-                    if (!pendingSeek) {
-                      return;
-                    }
-
-                    const video = event.currentTarget;
-                    const pendingSeconds = (Number(pendingSeek.localMs) || 0) / 1000;
-                    const clearPendingBlendSeek = () => {
-                      const pending = pendingBlendSeekRef.current;
-                      if (
-                        pending?.clipId === pendingSeek.clipId
-                        && Math.abs((Number(pending.localMs) || 0) - (Number(pendingSeek.localMs) || 0)) <= 0.5
-                      ) {
-                        pendingBlendSeekRef.current = null;
-                      }
-                    };
-
-                    seekVideoElement(video, pendingSeconds, {
-                      autoplay: pendingSeek.autoplay,
-                      onSettled: clearPendingBlendSeek
-                    });
-                  }}
-                />
-                <video
-                  ref={videoRef}
-                  className={`video-layer ${isGapPreview ? "gap-hidden" : ""}`}
-                  src={videoUrl}
-                  style={{ opacity: isGapPreview ? 0 : mainVideoOpacity }}
-                  onPlay={() => {
-                    playbackTickLastPerfRef.current = performance.now();
-                    isPlayingRef.current = true;
-                    setIsPlaying(true);
-                  }}
-                  onPause={() => {
-                    if (!gapPlaybackRef.current) {
-                      playbackTickLastPerfRef.current = null;
-                      isPlayingRef.current = false;
-                      setIsPlaying(false);
-                    }
-                  }}
-                  onEnded={continueTimelineAfterVideoEnded}
-                  onLoadedMetadata={(event) => {
-                    const video = event.currentTarget;
-                    const pendingSeek = pendingVideoSeekRef.current;
-                    if (pendingSeek) {
-                      if (pendingSeek.clipId && pendingSeek.clipId !== currentVideoClipIdRef.current) {
-                        currentVideoClipIdRef.current = pendingSeek.clipId;
-                        setCurrentVideoClipId(pendingSeek.clipId);
-                      }
-                      const pendingSeconds = (Number(pendingSeek.localMs) || 0) / 1000;
-                      const clearPendingSeek = () => {
-                        const pending = pendingVideoSeekRef.current;
-                        if (
-                          pending?.clipId === pendingSeek.clipId
-                          && Math.abs((Number(pending.localMs) || 0) - (Number(pendingSeek.localMs) || 0)) <= 0.5
-                        ) {
-                          pendingVideoSeekRef.current = null;
-                        }
-                      };
-                      if (pendingSeek.autoplay) {
-                        playAfterSeek(video, pendingSeconds, { onSettled: clearPendingSeek });
-                      } else {
-                        seekVideoElement(video, pendingSeconds, { onSettled: clearPendingSeek });
-                      }
-                    }
-
-                    const loadedDurationSeconds = Number(video.duration);
-                    const loadedDurationMs = Number.isFinite(loadedDurationSeconds) && loadedDurationSeconds > 0
-                      ? loadedDurationSeconds * 1000
-                      : null;
-                    const loadedWidth = Number(video.videoWidth) || 0;
-                    const loadedHeight = Number(video.videoHeight) || 0;
-                    let activeClipId = currentVideoClipIdRef.current;
-                    if (!activeClipId) {
-                      const fallbackClip = (videoClipsRef.current || []).find(
-                        (clip) => clip.url && clip.url === videoUrl
-                      );
-                      activeClipId = fallbackClip?.id || null;
-                    }
-
-                    if (activeClipId && loadedDurationMs) {
-                      setVideoClips((prev) => {
-                        let changed = false;
-                        const next = (prev || []).map((clip) => {
-                          if (clip.id !== activeClipId) {
-                            return clip;
-                          }
-
-                          const currentStart = Number(clip.sourceStartMs) || 0;
-                          const currentEnd = Number(clip.sourceEndMs);
-                          const hasValidRange = Number.isFinite(currentEnd) && currentEnd >= currentStart;
-                          const currentDuration = Number(clip.sourceDurationMs) || 0;
-
-                          const patch = {};
-                          if (Math.abs(currentDuration - loadedDurationMs) > 1) {
-                            patch.sourceDurationMs = loadedDurationMs;
-                          }
-                          if (!hasValidRange) {
-                            patch.sourceStartMs = currentStart;
-                            patch.sourceEndMs = currentStart + loadedDurationMs;
-                          } else if (currentEnd > loadedDurationMs && currentStart <= 0) {
-                            patch.sourceEndMs = loadedDurationMs;
-                          }
-                          if (loadedWidth > 0 && loadedWidth !== Number(clip.width)) {
-                            patch.width = loadedWidth;
-                          }
-                          if (loadedHeight > 0 && loadedHeight !== Number(clip.height)) {
-                            patch.height = loadedHeight;
-                          }
-
-                          if (Object.keys(patch).length === 0) {
-                            return clip;
-                          }
-
-                          changed = true;
-                          return { ...clip, ...patch };
-                        });
-
-                        return changed ? next : prev;
-                      });
-                    }
-
-                    const clipTimelineDurationSeconds = totalTimelineDurationMs(videoClipsRef.current) / 1000;
-                    const nextMeta = {
-                      width: loadedWidth || videoMetaRef.current.width,
-                      height: loadedHeight || videoMetaRef.current.height,
-                      fps: Number(videoMetaRef.current.fps) || DEFAULT_VIDEO_META.fps,
-                      duration: clipTimelineDurationSeconds > 0
-                        ? clipTimelineDurationSeconds
-                        : (loadedDurationMs ? loadedDurationMs / 1000 : (Number(videoMetaRef.current.duration) || DEFAULT_VIDEO_META.duration))
-                    };
-                    setVideoMeta(nextMeta);
-                    videoMetaRef.current = nextMeta;
-                    dirtyRef.current = true;
-                  }}
-                  onError={() => {
-                    const detail = mediaErrorMessage(videoRef.current?.error);
-                    setStatus(`Video failed to load: ${detail}`);
-                  }}
-                />
-
-                <canvas
-                  ref={canvasRef}
-                  className="draw-layer"
-                  onPointerDown={handleCanvasPointerDown}
-                  onPointerMove={handleCanvasPointerMove}
-                  onPointerUp={handleCanvasPointerUp}
-                  onPointerCancel={handleCanvasPointerCancel}
-                />
-              </div>
+              isPreviewDetached ? (
+                <div className="empty-stage detached-stage">
+                  <p>Preview undocked in a separate window.</p>
+                  <button onClick={() => dockPreview()}>Dock Preview</button>
+                </div>
+              ) : previewStage
             ) : (
               <div className="empty-stage">
                 <p>Load a local video file to begin annotation.</p>
@@ -2347,6 +2609,10 @@ function App() {
           onMoveSelectedToLayer={handleMoveSelectedClipsToLayer}
         />
       </main>
+
+      {hasVideo && isPreviewDetached && previewPortalNode
+        ? createPortal(previewStage, previewPortalNode)
+        : null}
 
       <div
         className="timeline-resizer"

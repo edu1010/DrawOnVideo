@@ -92,6 +92,24 @@ button.danger {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+  align-items: center;
+}
+
+.preview-scale-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.preview-scale-control select {
+  min-width: 84px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: linear-gradient(180deg, #1d2f45, #172536);
+  color: var(--text);
 }
 
 .project-meta {
@@ -264,12 +282,32 @@ button.danger {
   overflow: hidden;
 }
 
+.preview-resolution-shell {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.preview-resolution-shell.is-scaled {
+  width: calc(100% * var(--preview-scale));
+  height: calc(100% * var(--preview-scale));
+  transform-origin: top left;
+  transform: scale(calc(1 / var(--preview-scale)));
+  will-change: transform;
+}
+
 .video-layer,
 .draw-layer {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
+}
+
+.preview-resolution-shell.is-scaled .video-layer,
+.preview-resolution-shell.is-scaled .draw-layer {
+  image-rendering: pixelated;
 }
 
 .video-layer {
@@ -304,6 +342,14 @@ button.danger {
   background: rgba(10, 18, 28, 0.5);
   text-align: center;
   padding: 16px;
+}
+
+.detached-stage {
+  gap: 12px;
+}
+
+.detached-stage button {
+  min-width: 160px;
 }
 
 .panel-header {

@@ -198,9 +198,15 @@ function pointsUntilTime(stroke, timeMs) {
   return partial;
 }
 
-function renderLayerToCanvas(layerCanvas, layer, timeMs, fps) {
+function renderLayerToCanvas(layerCanvas, layer, timeMs, fps, coordinateScale = 1) {
+  const safeScale = Number.isFinite(Number(coordinateScale)) && Number(coordinateScale) > 0
+    ? Number(coordinateScale)
+    : 1;
   const layerCtx = layerCanvas.getContext("2d");
+  layerCtx.setTransform(1, 0, 0, 1, 0, 0);
   layerCtx.clearRect(0, 0, layerCanvas.width, layerCanvas.height);
+  layerCtx.save();
+  layerCtx.setTransform(safeScale, 0, 0, safeScale, 0, 0);
 
   for (const stroke of layer.strokes || []) {
     const clipStart = strokeClipStartMs(stroke, fps);
@@ -216,6 +222,8 @@ function renderLayerToCanvas(layerCanvas, layer, timeMs, fps) {
 
     drawStroke(layerCtx, stroke, points);
   }
+
+  layerCtx.restore();
 }
 
 export function createRenderState() {
@@ -233,30 +241,38 @@ export function renderAnnotationOverlay({
   fps,
   renderState,
   activeStroke,
-  onionSkin
+  onionSkin,
+  coordinateScale = 1
 }) {
   if (!targetCtx) {
     return;
   }
 
   const safeFps = Number.isFinite(fps) && fps > 0 ? fps : 30;
+  const safeScale = Number.isFinite(Number(coordinateScale)) && Number(coordinateScale) > 0
+    ? Number(coordinateScale)
+    : 1;
   const currentTimeMs = Math.max(0, (timeSeconds || 0) * 1000);
   const prevFrameTimeMs = Math.max(0, currentTimeMs - 1000 / safeFps);
 
+  targetCtx.setTransform(1, 0, 0, 1, 0, 0);
   targetCtx.clearRect(0, 0, width, height);
 
   if (onionSkin) {
-    drawFrame(targetCtx, width, height, layers, prevFrameTimeMs, safeFps, renderState, 0.35);
+    drawFrame(targetCtx, width, height, layers, prevFrameTimeMs, safeFps, renderState, safeScale, 0.35);
   }
 
-  drawFrame(targetCtx, width, height, layers, currentTimeMs, safeFps, renderState, 1);
+  drawFrame(targetCtx, width, height, layers, currentTimeMs, safeFps, renderState, safeScale, 1);
 
   if (activeStroke) {
+    targetCtx.save();
+    targetCtx.setTransform(safeScale, 0, 0, safeScale, 0, 0);
     drawStroke(targetCtx, activeStroke);
+    targetCtx.restore();
   }
 }
 
-function drawFrame(targetCtx, width, height, layers, timeMs, fps, renderState, alpha) {
+function drawFrame(targetCtx, width, height, layers, timeMs, fps, renderState, coordinateScale, alpha) {
   if (!Array.isArray(layers) || layers.length === 0 || !Number.isFinite(timeMs) || timeMs < 0) {
     return;
   }
@@ -270,7 +286,7 @@ function drawFrame(targetCtx, width, height, layers, timeMs, fps, renderState, a
     }
 
     const layerCanvas = ensureLayerCanvas(renderState.perLayerCanvas, layer.id, width, height);
-    renderLayerToCanvas(layerCanvas, layer, timeMs, fps);
+    renderLayerToCanvas(layerCanvas, layer, timeMs, fps, coordinateScale);
     targetCtx.drawImage(layerCanvas, 0, 0, width, height);
   }
 

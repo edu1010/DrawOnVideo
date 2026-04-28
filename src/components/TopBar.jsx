@@ -2,11 +2,15 @@ function TopBar({
   projectName,
   status,
   exportState,
+  previewScale,
+  isPreviewDetached,
   onOpenVideo,
   onAddVideo,
   onSaveProject,
   onLoadProject,
   onExportVideo,
+  onPreviewScaleChange,
+  onTogglePreviewDetach,
   disabled,
   canAddVideo
 }) {
@@ -24,6 +28,22 @@ function TopBar({
         <button onClick={onExportVideo} disabled={disabled || exportState.running}>
           {exportState.running ? "Exporting..." : "Export Video"}
         </button>
+        <button onClick={onTogglePreviewDetach} disabled={disabled}>
+          {isPreviewDetached ? "Dock Preview" : "Undock Preview"}
+        </button>
+        <label className="preview-scale-control" htmlFor="preview-scale-select">
+          Preview
+          <select
+            id="preview-scale-select"
+            value={String(previewScale)}
+            onChange={(event) => onPreviewScaleChange?.(Number(event.target.value))}
+          >
+            <option value="1">1x</option>
+            <option value="0.75">3/4x</option>
+            <option value="0.5">1/2x</option>
+            <option value="0.25">1/4x</option>
+          </select>
+        </label>
       </div>
 
       <div className="project-meta">
