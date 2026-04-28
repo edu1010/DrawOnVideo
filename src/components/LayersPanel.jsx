@@ -1,3 +1,16 @@
+import {
+  Button,
+  Chip,
+  IconButton,
+  Stack,
+  Typography
+} from "@mui/material";
+import AddRoundedIcon from "@mui/icons-material/AddRounded";
+import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
+import DriveFileMoveRoundedIcon from "@mui/icons-material/DriveFileMoveRounded";
+import VisibilityOffRoundedIcon from "@mui/icons-material/VisibilityOffRounded";
+import VisibilityRoundedIcon from "@mui/icons-material/VisibilityRounded";
+
 function LayersPanel({
   layers,
   activeLayerId,
@@ -10,10 +23,14 @@ function LayersPanel({
 }) {
   return (
     <aside className="layers-panel">
-      <div className="panel-header">
-        <h2>Layers</h2>
-        <button onClick={onAddLayer}>+ Layer</button>
-      </div>
+      <Stack className="panel-header" direction="row" justifyContent="space-between" alignItems="center">
+        <Typography variant="h6" component="h2">
+          Annotation layers
+        </Typography>
+        <Button variant="contained" size="small" startIcon={<AddRoundedIcon />} onClick={onAddLayer}>
+          Add
+        </Button>
+      </Stack>
 
       <div className="layers-list">
         {layers.map((layer) => (
@@ -22,38 +39,50 @@ function LayersPanel({
             key={layer.id}
             onClick={() => onSelectLayer(layer.id)}
           >
-            <button
+            <IconButton
               className="visibility-btn"
+              size="small"
               title={layer.visible ? "Hide layer" : "Show layer"}
               onClick={(event) => {
                 event.stopPropagation();
                 onToggleVisibility(layer.id);
               }}
             >
-              {layer.visible ? "On" : "Off"}
-            </button>
+              {layer.visible ? <VisibilityRoundedIcon fontSize="small" /> : <VisibilityOffRoundedIcon fontSize="small" />}
+            </IconButton>
             <div className="layer-name-wrap">
               <span className="layer-name">{layer.name}</span>
-              <span className="layer-meta">{layer.strokes.length} strokes</span>
+              <Chip
+                size="small"
+                variant="outlined"
+                label={`${layer.strokes.length} strokes`}
+                sx={{ width: "fit-content", color: "text.secondary" }}
+              />
             </div>
-            <button
+                <Button
+              size="small"
+              variant="outlined"
+              startIcon={<DriveFileMoveRoundedIcon />}
               disabled={!selectedClipCount}
               onClick={(event) => {
                 event.stopPropagation();
                 onMoveSelectedToLayer?.(layer.id);
               }}
             >
-              Move Sel
-            </button>
-            <button
-              className="danger"
+              Move selected
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              color="error"
+              startIcon={<DeleteOutlineRoundedIcon />}
               onClick={(event) => {
                 event.stopPropagation();
                 onDeleteLayer(layer.id);
               }}
             >
               Delete
-            </button>
+            </Button>
           </div>
         ))}
       </div>

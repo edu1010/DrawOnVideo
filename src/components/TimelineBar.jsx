@@ -1,4 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Button,
+  FormControlLabel,
+  Slider,
+  Stack,
+  Switch,
+  ToggleButton,
+  ToggleButtonGroup,
+  Typography
+} from "@mui/material";
 import { formatTime } from "../utils/time";
 import { strokeClipWindowMs } from "../utils/strokeClip";
 import { clipTimelineEndMs } from "../utils/videoClipOps";
@@ -617,87 +627,94 @@ function TimelineBar({
   return (
     <footer className="timeline-bar">
       <div className="transport-row">
-        <button onClick={() => onStepFrame(-1)} disabled={disabled}>
-          -1 frame
-        </button>
-        <button onClick={onTogglePlay} disabled={disabled}>
+        <Button size="small" variant="outlined" onClick={() => onStepFrame(-1)} disabled={disabled}>
+          Previous frame
+        </Button>
+        <Button size="small" variant="contained" onClick={onTogglePlay} disabled={disabled}>
           {isPlaying ? "Pause" : "Play"}
-        </button>
-        <button onClick={() => onStepFrame(1)} disabled={disabled}>
-          +1 frame
-        </button>
+        </Button>
+        <Button size="small" variant="outlined" onClick={() => onStepFrame(1)} disabled={disabled}>
+          Next frame
+        </Button>
 
-        <span className="time-readout">
+        <Typography className="time-readout" variant="body2">
           {formatTime(currentTime)} / {formatTime(timelineSpanSec)}
-        </span>
+        </Typography>
 
-        <span className="time-readout">
-          FPS: {fps.toFixed(2)} | Frame: {Math.round(currentTime * fps)} | {frameMs.toFixed(2)} ms/frame
-        </span>
+        <Typography className="time-readout" variant="body2">
+          {`${fps.toFixed(2)} fps | Frame ${Math.round(currentTime * fps)} | ${frameMs.toFixed(2)} ms`}
+        </Typography>
 
         <div className="timeline-inline-controls">
-          <label>
-            Zoom
-            <input
-              type="range"
+          <Stack minWidth={180}>
+            <Typography variant="caption" color="text.secondary">
+              Zoom
+            </Typography>
+            <Slider
               min={45}
               max={260}
               step={1}
               value={pixelsPerSecond}
-              onChange={(event) => setPixelsPerSecond(Number(event.target.value))}
+              onChange={(_, value) => setPixelsPerSecond(Number(value))}
               disabled={disabled}
             />
-          </label>
+          </Stack>
 
-          <label>
-            Track H
-            <input
-              type="range"
+          <Stack minWidth={180}>
+            <Typography variant="caption" color="text.secondary">
+              Track height
+            </Typography>
+            <Slider
               min={40}
               max={120}
               step={2}
               value={trackHeight}
-              onChange={(event) => setTrackHeight(Number(event.target.value))}
+              onChange={(_, value) => setTrackHeight(Number(value))}
               disabled={disabled}
             />
-          </label>
+          </Stack>
 
-          <button
-            className={timelineTool === "move" ? "active" : ""}
-            onClick={() => setTimelineTool("move")}
+          <ToggleButtonGroup
+            size="small"
+            exclusive
+            value={timelineTool}
+            onChange={(_, value) => {
+              if (value) {
+                setTimelineTool(value);
+              }
+            }}
             disabled={disabled}
           >
-            Move
-          </button>
-          <button
-            className={timelineTool === "cut" ? "active" : ""}
-            onClick={() => setTimelineTool("cut")}
-            disabled={disabled}
-          >
-            Cut
-          </button>
+            <ToggleButton value="move">Move</ToggleButton>
+            <ToggleButton value="cut">Cut</ToggleButton>
+          </ToggleButtonGroup>
 
-          <button onClick={onAddVideoLayer} disabled={disabled}>
-            + Video Layer
-          </button>
-          <button
+          <Button size="small" variant="outlined" onClick={onAddVideoLayer} disabled={disabled}>
+            Add video layer
+          </Button>
+          <Button
+            size="small"
+            variant="outlined"
             onClick={onDeleteVideoLayer}
             disabled={disabled || videoLayerRows.length <= 1}
           >
-            - Video Layer
-          </button>
-          <button
+            Remove video layer
+          </Button>
+          <Button
+            size="small"
+            variant="outlined"
             onClick={onMoveSelectedVideoToActiveLayer}
             disabled={disabled || selectedVideoIds.size === 0}
           >
-            Move Sel Video
-          </button>
+            Move selected clips
+          </Button>
 
           {selectedVideoClip ? (
-            <div className="video-audio-editor">
-              <label>
-                <input
-                  type="checkbox"
+            <Stack className="video-audio-editor" direction="row" alignItems="center" gap={1.25}>
+              <FormControlLabel
+                label="Mute clip"
+                control={(
+                  <Switch
                   checked={Boolean(selectedVideoClip.audioMuted)}
                   onChange={(event) =>
                     onUpdateVideoClipAudio?.(selectedVideoClip.id, {
@@ -705,28 +722,29 @@ function TimelineBar({
                     })
                   }
                   disabled={disabled}
-                />
-                Mute
-              </label>
+                  />
+                )}
+              />
 
-              <label>
-                dB
-                <input
-                  type="range"
+              <Stack minWidth={170}>
+                <Typography variant="caption" color="text.secondary">
+                  Clip gain (dB)
+                </Typography>
+                <Slider
                   min={-60}
                   max={18}
                   step={1}
                   value={clampDb(selectedVideoClip.audioGainDb)}
-                  onChange={(event) =>
+                  onChange={(_, value) =>
                     onUpdateVideoClipAudio?.(selectedVideoClip.id, {
-                      audioGainDb: Number(event.target.value)
+                      audioGainDb: Number(value)
                     })
                   }
                   disabled={disabled}
                 />
-                <span>{clampDb(selectedVideoClip.audioGainDb).toFixed(0)} dB</span>
-              </label>
-            </div>
+                <Typography variant="caption">{clampDb(selectedVideoClip.audioGainDb).toFixed(0)} dB</Typography>
+              </Stack>
+            </Stack>
           ) : null}
         </div>
       </div>

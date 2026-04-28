@@ -51,20 +51,27 @@ import {
 
 const desktopAPI = window.desktopAPI;
 const PREVIEW_SCALES = [1, 0.75, 0.5, 0.25];
-const DOCK_ZONES = ["left", "right", "bottom"];
+const DOCK_ZONES = ["top", "left", "right", "bottom"];
+const PANEL_DEFAULT_ZONE = {
+  tools: "left",
+  layers: "right",
+  timeline: "bottom"
+};
 const DEFAULT_DOCK_LAYOUT = {
+  top: [],
   left: ["tools"],
   right: ["layers"],
   bottom: ["timeline"]
 };
 const PANEL_TITLES = {
-  tools: "Tools",
-  layers: "Layers",
-  timeline: "Timeline"
+  tools: "Drawing Tools",
+  layers: "Annotation Layers",
+  timeline: "Timeline Editor"
 };
 
 function removePanelFromLayout(layout, panelId) {
   const next = {
+    top: [...(layout.top || [])],
     left: [...(layout.left || [])],
     right: [...(layout.right || [])],
     bottom: [...(layout.bottom || [])]
@@ -73,6 +80,39 @@ function removePanelFromLayout(layout, panelId) {
     next[zone] = next[zone].filter((id) => id !== panelId);
   }
   return next;
+}
+
+function defaultDockZoneForPanel(panelId) {
+  return PANEL_DEFAULT_ZONE[panelId] || "left";
+}
+
+function findPanelDockZone(layout, panelId) {
+  if (!layout || !panelId) {
+    return null;
+  }
+
+  for (const zone of DOCK_ZONES) {
+    if ((layout[zone] || []).includes(panelId)) {
+      return zone;
+    }
+  }
+
+  return null;
+}
+
+function dockZoneFromPoint(clientX, clientY, zoneRects) {
+  for (const zone of DOCK_ZONES) {
+    const rect = zoneRects?.[zone];
+    if (!rect) {
+      continue;
+    }
+    const insideX = clientX >= rect.left && clientX <= rect.left + rect.width;
+    const insideY = clientY >= rect.top && clientY <= rect.top + rect.height;
+    if (insideX && insideY) {
+      return zone;
+    }
+  }
+  return null;
 }
 
 function insertPanelIntoLayout(layout, panelId, zone, index = null) {
@@ -508,7 +548,7 @@ function App() {
   const [currentPressureInput, setCurrentPressureInput] = useState(IDLE_PRESSURE_INPUT);
   const [brush, setBrush] = useState(DEFAULT_BRUSH);
   const [onionSkin, setOnionSkin] = useState(false);
-  const [status, setStatus] = useState("Ready. Open a local video to start annotating.");
+  const [status, setStatus] = useState("Ready. Open a video clip to start annotating.");
   const [exportState, setExportState] = useState({ running: false, progress: 0 });
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [selectedClips, setSelectedClips] = useState([]);
@@ -516,8 +556,11 @@ function App() {
   const [dockLayout, setDockLayout] = useState(DEFAULT_DOCK_LAYOUT);
   const [detachedPanelHosts, setDetachedPanelHosts] = useState({});
   const [dragOverTarget, setDragOverTarget] = useState(null);
+  const [isPanelDragging, setIsPanelDragging] = useState(false);
+  const [snapZoneRects, setSnapZoneRects] = useState({});
   const [leftPanelWidth, setLeftPanelWidth] = useState(270);
   const [rightPanelWidth, setRightPanelWidth] = useState(300);
+  const [bottomDockHeight, setBottomDockHeight] = useState(360);
   const [timelineViewportHeight, setTimelineViewportHeight] = useState(260);
   const [isPreviewDetached, setIsPreviewDetached] = useState(false);
   const [previewPortalNode, setPreviewPortalNode] = useState(null);
@@ -525,12 +568,20 @@ function App() {
   const videoRef = useRef(null);
   const blendVideoRef = useRef(null);
   const canvasRef = useRef(null);
+  const appShellRef = useRef(null);
+  const topDockZoneRef = useRef(null);
+  const leftDockZoneRef = useRef(null);
+  const rightDockZoneRef = useRef(null);
+  const bottomDockZoneRef = useRef(null);
+  const snapMeasureRafRef = useRef(0);
   const previewWindowRef = useRef(null);
   const previewPopoutOpenedAtRef = useRef(null);
   const previewPopoutMovedRef = useRef(false);
   const previewPopoutNearSinceRef = useRef(null);
   const detachedPanelWindowsRef = useRef({});
+  const lastDockZoneRef = useRef({ ...PANEL_DEFAULT_ZONE });
   const draggedPanelRef = useRef(null);
+  const panelPointerDragRef = useRef(null);
   const videoLayersRef = useRef(videoLayers);
   const activeVideoLayerIdRef = useRef(activeVideoLayerId);
   const videoClipsRef = useRef(videoClips);
@@ -593,6 +644,87 @@ function App() {
       }
     }
   }, []);
+
+  const readSnapZoneRects = useCallback(() => {
+    const zoneNodes = {
+      top: topDockZoneRef.current,
+      left: leftDockZoneRef.current,
+      right: rightDockZoneRef.current,
+      bottom: bottomDockZoneRef.current
+    };
+
+    const next = {};
+    for (const zone of DOCK_ZONES) {
+      const node = zoneNodes[zone];
+      if (!node) {
+        continue;
+      }
+
+      const rect = node.getBoundingClientRect();
+      if (rect.width < 8 || rect.height < 8) {
+        continue;
+      }
+
+      next[zone] = {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height
+      };
+    }
+
+    return next;
+  }, []);
+
+  const measureSnapZoneRects = useCallback(() => {
+    setSnapZoneRects(readSnapZoneRects());
+  }, [readSnapZoneRects]);
+
+  const scheduleSnapZoneRectsMeasurement = useCallback(() => {
+    if (snapMeasureRafRef.current) {
+      window.cancelAnimationFrame(snapMeasureRafRef.current);
+    }
+    snapMeasureRafRef.current = window.requestAnimationFrame(() => {
+      snapMeasureRafRef.current = 0;
+      measureSnapZoneRects();
+    });
+  }, [measureSnapZoneRects]);
+
+  useEffect(() => {
+    if (!isPanelDragging) {
+      setSnapZoneRects({});
+      if (snapMeasureRafRef.current) {
+        window.cancelAnimationFrame(snapMeasureRafRef.current);
+        snapMeasureRafRef.current = 0;
+      }
+      return undefined;
+    }
+
+    const onViewportChange = () => {
+      scheduleSnapZoneRectsMeasurement();
+    };
+
+    scheduleSnapZoneRectsMeasurement();
+    window.addEventListener("resize", onViewportChange);
+    window.addEventListener("scroll", onViewportChange, true);
+
+    return () => {
+      window.removeEventListener("resize", onViewportChange);
+      window.removeEventListener("scroll", onViewportChange, true);
+      if (snapMeasureRafRef.current) {
+        window.cancelAnimationFrame(snapMeasureRafRef.current);
+        snapMeasureRafRef.current = 0;
+      }
+    };
+  }, [
+    dockLayout,
+    isPanelDragging,
+    leftPanelWidth,
+    bottomDockHeight,
+    rightPanelWidth,
+    scheduleSnapZoneRectsMeasurement,
+    timelineViewportHeight
+  ]);
 
   const dockPreview = useCallback((options = {}) => {
     const { closeWindow = true } = options;
@@ -694,7 +826,9 @@ function App() {
   const dockPanel = useCallback((panelId, zone, index = null, options = {}) => {
     const targetZone = DOCK_ZONES.includes(zone)
       ? zone
-      : (panelId === "timeline" ? "bottom" : (panelId === "layers" ? "right" : "left"));
+      : (lastDockZoneRef.current[panelId] || defaultDockZoneForPanel(panelId));
+
+    lastDockZoneRef.current[panelId] = targetZone;
     closeDetachedPanelWindow(panelId, options);
     setDockLayout((prev) => insertPanelIntoLayout(prev, panelId, targetZone, index));
   }, [closeDetachedPanelWindow]);
@@ -716,6 +850,11 @@ function App() {
       setStatus("Panel pop-out blocked by the system/browser.");
       return;
     }
+
+    const currentZone = findPanelDockZone(dockLayout, panelId)
+      || lastDockZoneRef.current[panelId]
+      || defaultDockZoneForPanel(panelId);
+    lastDockZoneRef.current[panelId] = currentZone;
 
     const doc = panelWindow.document;
     doc.title = `DrawOnVideo - ${PANEL_TITLES[panelId] || "Panel"}`;
@@ -740,7 +879,7 @@ function App() {
       if (detachedPanelWindowsRef.current[panelId] === panelWindow) {
         dockPanel(
           panelId,
-          panelId === "timeline" ? "bottom" : (panelId === "layers" ? "right" : "left"),
+          lastDockZoneRef.current[panelId] || defaultDockZoneForPanel(panelId),
           null,
           { closeWindow: false }
         );
@@ -748,18 +887,96 @@ function App() {
     };
 
     panelWindow.addEventListener("beforeunload", onPanelClosed, { once: true });
-  }, [dockPanel]);
+  }, [dockLayout, dockPanel]);
 
   const onPanelDragStart = useCallback((event, panelId) => {
     draggedPanelRef.current = panelId;
+    setIsPanelDragging(true);
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", panelId);
-  }, []);
+    scheduleSnapZoneRectsMeasurement();
+  }, [scheduleSnapZoneRectsMeasurement]);
 
   const onPanelDragEnd = useCallback(() => {
+    panelPointerDragRef.current = null;
     draggedPanelRef.current = null;
+    setIsPanelDragging(false);
     setDragOverTarget(null);
   }, []);
+
+  const beginPanelPointerDrag = useCallback((event, panelId, options = {}) => {
+    const { detached = false } = options;
+    if (detached || event.button !== 0) {
+      return;
+    }
+
+    if (event.target.closest("button,input,select,textarea,a")) {
+      return;
+    }
+
+    panelPointerDragRef.current = {
+      active: false,
+      panelId,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY
+    };
+
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }, []);
+
+  const updatePanelPointerDrag = useCallback((event) => {
+    const drag = panelPointerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+    if (!drag.active && distance < 6) {
+      return;
+    }
+
+    if (!drag.active) {
+      drag.active = true;
+      draggedPanelRef.current = drag.panelId;
+      setIsPanelDragging(true);
+      scheduleSnapZoneRectsMeasurement();
+    }
+
+    event.preventDefault();
+    const rects = readSnapZoneRects();
+    if (Object.keys(rects).length > 0) {
+      setSnapZoneRects(rects);
+    }
+
+    const zone = dockZoneFromPoint(event.clientX, event.clientY, rects);
+    setDragOverTarget(zone ? { zone, index: null } : null);
+  }, [readSnapZoneRects, scheduleSnapZoneRectsMeasurement]);
+
+  const finishPanelPointerDrag = useCallback((event) => {
+    const drag = panelPointerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+
+    if (!drag.active) {
+      panelPointerDragRef.current = null;
+      return;
+    }
+
+    const rects = readSnapZoneRects();
+    const zone = dockZoneFromPoint(event.clientX, event.clientY, rects)
+      || dragOverTarget?.zone
+      || null;
+
+    if (zone) {
+      dockPanel(drag.panelId, zone, null);
+    }
+
+    onPanelDragEnd();
+  }, [dockPanel, dragOverTarget?.zone, onPanelDragEnd, readSnapZoneRects]);
 
   const onDockTargetDragOver = useCallback((event, zone, index = null) => {
     event.preventDefault();
@@ -2395,12 +2612,23 @@ function App() {
         );
         setRightPanelWidth(next);
       } else if (activeResize.mode === "timeline-height") {
+        const maxBottomDockHeight = Math.max(260, window.innerHeight - 170);
         const next = clamp(
-          activeResize.startTimelineHeight - (event.clientY - activeResize.startY),
-          150,
-          560
+          activeResize.startBottomDockHeight - (event.clientY - activeResize.startY),
+          160,
+          maxBottomDockHeight
         );
-        setTimelineViewportHeight(next);
+        setBottomDockHeight(next);
+        setTimelineViewportHeight(Math.max(140, next - 130));
+      } else if (activeResize.mode === "timeline-height-bottom") {
+        const maxBottomDockHeight = Math.max(260, window.innerHeight - 170);
+        const next = clamp(
+          activeResize.startBottomDockHeight + (event.clientY - activeResize.startY),
+          160,
+          maxBottomDockHeight
+        );
+        setBottomDockHeight(next);
+        setTimelineViewportHeight(Math.max(140, next - 130));
       }
     };
 
@@ -2427,9 +2655,19 @@ function App() {
       startY: event.clientY,
       startLeftWidth: leftPanelWidth,
       startRightWidth: rightPanelWidth,
+      startBottomDockHeight: bottomDockHeight,
       startTimelineHeight: timelineViewportHeight
     };
-  }, [leftPanelWidth, rightPanelWidth, timelineViewportHeight]);
+  }, [bottomDockHeight, leftPanelWidth, rightPanelWidth, timelineViewportHeight]);
+
+  useEffect(() => {
+    const timelineIsDocked = DOCK_ZONES.some((zone) => (dockLayout[zone] || []).includes("timeline"));
+    const timelineIsDetached = Boolean(detachedPanelWindowsRef.current.timeline)
+      || Boolean(detachedPanelHosts.timeline);
+    if (!timelineIsDocked && !timelineIsDetached) {
+      setDockLayout((prev) => insertPanelIntoLayout(prev, "timeline", "bottom"));
+    }
+  }, [dockLayout, detachedPanelHosts]);
 
   const handleOpenExportDialog = useCallback(() => {
     if (!videoClipsRef.current.length || exportState.running) {
@@ -2754,6 +2992,14 @@ function App() {
     const { detached = false } = options;
     const isDragOver = dragOverTarget?.zone === zone && dragOverTarget?.index === index;
     const isPanelDetached = Boolean(detachedPanelHosts[panelId]);
+    const dockQuickActions = (
+      <>
+        <button type="button" onClick={() => dockPanel(panelId, "top")} title="Attach to top">Top</button>
+        <button type="button" onClick={() => dockPanel(panelId, "left")} title="Attach to left">Left</button>
+        <button type="button" onClick={() => dockPanel(panelId, "right")} title="Attach to right">Right</button>
+        <button type="button" onClick={() => dockPanel(panelId, "bottom")} title="Attach to bottom">Bottom</button>
+      </>
+    );
 
     return (
       <div
@@ -2772,23 +3018,25 @@ function App() {
       >
         <div
           className="dock-panel-titlebar"
-          draggable={!detached}
-          onDragStart={(event) => onPanelDragStart(event, panelId)}
-          onDragEnd={onPanelDragEnd}
+          draggable={detached}
+          onDragStart={detached ? (event) => onPanelDragStart(event, panelId) : undefined}
+          onDragEnd={detached ? onPanelDragEnd : undefined}
+          onPointerDown={(event) => beginPanelPointerDrag(event, panelId, { detached })}
+          onPointerMove={updatePanelPointerDrag}
+          onPointerUp={finishPanelPointerDrag}
+          onPointerCancel={onPanelDragEnd}
         >
           <strong>{PANEL_TITLES[panelId] || panelId}</strong>
           <div className="dock-panel-actions">
             {detached || isPanelDetached ? (
-              <button
-                type="button"
-                onClick={() => dockPanel(panelId, panelId === "timeline" ? "bottom" : (panelId === "layers" ? "right" : "left"))}
-              >
-                Dock
-              </button>
+              dockQuickActions
             ) : (
-              <button type="button" onClick={() => undockPanel(panelId)}>
-                Pop Out
-              </button>
+              <>
+                {dockQuickActions}
+                <button type="button" onClick={() => undockPanel(panelId)}>
+                  Open in separate window
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -2804,8 +3052,116 @@ function App() {
     return panelIds.map((panelId, index) => renderDockPanel(panelId, zone, index));
   };
 
+  const renderDropHint = (zone, label) => {
+    if (!isPanelDragging) {
+      return null;
+    }
+
+    const isOver = dragOverTarget?.zone === zone && dragOverTarget?.index === null;
+    return (
+      <div className={`dock-zone-drop-hint ${isOver ? "is-over" : ""}`}>
+        Drop panel to {label}
+      </div>
+    );
+  };
+
+  const renderSnapDropTarget = (zone, label) => {
+    if (!isPanelDragging) {
+      return null;
+    }
+
+    const rect = snapZoneRects[zone];
+    if (!rect) {
+      return null;
+    }
+
+    const shellRect = appShellRef.current?.getBoundingClientRect();
+    const shellScrollLeft = appShellRef.current?.scrollLeft || 0;
+    const shellScrollTop = appShellRef.current?.scrollTop || 0;
+    if (!shellRect) {
+      return null;
+    }
+
+    const isOver = dragOverTarget?.zone === zone;
+    const targetStyle = {
+      left: `${Math.max(0, rect.left - shellRect.left + shellScrollLeft)}px`,
+      top: `${Math.max(0, rect.top - shellRect.top + shellScrollTop)}px`,
+      width: `${Math.max(0, rect.width)}px`,
+      height: `${Math.max(0, rect.height)}px`
+    };
+
+    return (
+      <div
+        className={`dock-snap-target ${isOver ? "is-over" : ""}`}
+        style={targetStyle}
+      >
+        <span>{label}</span>
+      </div>
+    );
+  };
+
+  const bottomPanelIds = dockLayout.bottom || [];
+  const hasBottomPanels = bottomPanelIds.length > 0;
+  const mainDockHeightStyle = hasBottomPanels ? {
+    "--bottom-dock-height": `${bottomDockHeight}px`
+  } : undefined;
+
+  const onSnapOverlayDragOver = useCallback((event) => {
+    if (!isPanelDragging) {
+      return;
+    }
+
+    event.preventDefault();
+    const zone = dockZoneFromPoint(event.clientX, event.clientY, snapZoneRects);
+    if (zone) {
+      setDragOverTarget({ zone, index: null });
+    } else {
+      setDragOverTarget(null);
+    }
+
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+  }, [isPanelDragging, snapZoneRects]);
+
+  const onSnapOverlayDrop = useCallback((event) => {
+    if (!isPanelDragging) {
+      return;
+    }
+
+    event.preventDefault();
+    const panelId = draggedPanelRef.current
+      || event.dataTransfer.getData("text/plain")
+      || "";
+    const zone = dockZoneFromPoint(event.clientX, event.clientY, snapZoneRects)
+      || dragOverTarget?.zone
+      || null;
+
+    if (!panelId || !zone) {
+      onPanelDragEnd();
+      return;
+    }
+
+    dockPanel(panelId, zone, null);
+    onPanelDragEnd();
+  }, [dockPanel, dragOverTarget?.zone, isPanelDragging, onPanelDragEnd, snapZoneRects]);
+
   return (
-    <div className="app-shell">
+    <div className="app-shell" ref={appShellRef}>
+      {isPanelDragging ? (
+        <div
+          className="dock-snap-overlay"
+          aria-hidden
+          onDragOver={onSnapOverlayDragOver}
+          onDrop={onSnapOverlayDrop}
+        >
+          {renderSnapDropTarget("top", "Drop to Top")}
+          {renderSnapDropTarget("left", "Drop to Left")}
+          {renderSnapDropTarget("right", "Drop to Right")}
+          {renderSnapDropTarget("bottom", "Drop to Bottom")}
+        </div>
+      ) : null}
+
       <TopBar
         projectName={projectName}
         status={status}
@@ -2823,78 +3179,102 @@ function App() {
         canAddVideo={hasVideo}
       />
 
-      <main
-        className="main-layout"
-        style={{
-          "--left-panel-width": `${leftPanelWidth}px`,
-          "--right-panel-width": `${rightPanelWidth}px`
-        }}
-      >
-        <div
-          className={`dock-zone dock-zone-left ${dragOverTarget?.zone === "left" ? "drop-active" : ""}`}
-          onDragOver={(event) => onDockTargetDragOver(event, "left")}
-          onDrop={(event) => onDockTargetDrop(event, "left")}
+      <div className="main-dock-area" style={mainDockHeightStyle}>
+        {(dockLayout.top || []).length > 0 || isPanelDragging ? (
+          <section
+            ref={topDockZoneRef}
+            className={`dock-zone dock-zone-top ${dragOverTarget?.zone === "top" ? "drop-active" : ""} ${(dockLayout.top || []).length === 0 ? "is-empty" : ""}`}
+            onDragOver={(event) => onDockTargetDragOver(event, "top")}
+            onDrop={(event) => onDockTargetDrop(event, "top")}
+          >
+            {renderZonePanels("top")}
+            {renderDropHint("top", "top")}
+          </section>
+        ) : null}
+
+        <main
+          className="main-layout"
+          style={{
+            "--left-panel-width": `${leftPanelWidth}px`,
+            "--right-panel-width": `${rightPanelWidth}px`
+          }}
         >
-          {renderZonePanels("left")}
-        </div>
-
-        <div
-          className="panel-resizer vertical"
-          onPointerDown={(event) => beginUiResize(event, "left-panel")}
-          title="Resize left zone"
-        />
-
-        <section className="stage-section">
-          <div className="stage-wrapper">
-            {hasVideo ? (
-              isPreviewDetached ? (
-                <div className="empty-stage detached-stage">
-                  <p>Preview undocked in a separate window.</p>
-                  <button onClick={() => dockPreview()}>Dock Preview</button>
-                </div>
-              ) : previewStage
-            ) : (
-              <div className="empty-stage">
-                <p>Load a local video file to begin annotation.</p>
-              </div>
-            )}
+          <div
+            ref={leftDockZoneRef}
+            className={`dock-zone dock-zone-left ${dragOverTarget?.zone === "left" ? "drop-active" : ""}`}
+            onDragOver={(event) => onDockTargetDragOver(event, "left")}
+            onDrop={(event) => onDockTargetDrop(event, "left")}
+          >
+            {renderZonePanels("left")}
+            {renderDropHint("left", "left side")}
           </div>
-        </section>
 
-        <div
-          className="panel-resizer vertical"
-          onPointerDown={(event) => beginUiResize(event, "right-panel")}
-          title="Resize right zone"
-        />
+          <div
+            className="panel-resizer vertical"
+            onPointerDown={(event) => beginUiResize(event, "left-panel")}
+            title="Resize left zone"
+          />
 
-        <div
-          className={`dock-zone dock-zone-right ${dragOverTarget?.zone === "right" ? "drop-active" : ""}`}
-          onDragOver={(event) => onDockTargetDragOver(event, "right")}
-          onDrop={(event) => onDockTargetDrop(event, "right")}
-        >
-          {renderZonePanels("right")}
-        </div>
-      </main>
+          <section className="stage-section">
+            <div className="stage-wrapper">
+              {hasVideo ? (
+                isPreviewDetached ? (
+                  <div className="empty-stage detached-stage">
+                    <p>Preview is open in a separate window.</p>
+                    <button onClick={() => dockPreview()}>Return preview to main window</button>
+                  </div>
+                ) : previewStage
+              ) : (
+                <div className="empty-stage">
+                  <p>Open a local video clip to begin annotation.</p>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <div
+            className="panel-resizer vertical"
+            onPointerDown={(event) => beginUiResize(event, "right-panel")}
+            title="Resize right zone"
+          />
+
+          <div
+            ref={rightDockZoneRef}
+            className={`dock-zone dock-zone-right ${dragOverTarget?.zone === "right" ? "drop-active" : ""}`}
+            onDragOver={(event) => onDockTargetDragOver(event, "right")}
+            onDrop={(event) => onDockTargetDrop(event, "right")}
+          >
+            {renderZonePanels("right")}
+            {renderDropHint("right", "right side")}
+          </div>
+        </main>
+      </div>
 
       {hasVideo && isPreviewDetached && previewPortalNode
         ? createPortal(previewStage, previewPortalNode)
         : null}
 
-      {(dockLayout.bottom || []).length > 0 ? (
-        <div
-          className="timeline-resizer"
-          onPointerDown={(event) => beginUiResize(event, "timeline-height")}
-          title="Resize bottom zone"
-        />
+      {hasBottomPanels || isPanelDragging ? (
+        <section
+          ref={bottomDockZoneRef}
+          className={`dock-zone dock-zone-bottom ${dragOverTarget?.zone === "bottom" ? "drop-active" : ""} ${!hasBottomPanels ? "is-empty" : ""}`}
+          style={hasBottomPanels ? {
+            "--bottom-dock-height": `${bottomDockHeight}px`
+          } : undefined}
+          onDragOver={(event) => onDockTargetDragOver(event, "bottom")}
+          onDrop={(event) => onDockTargetDrop(event, "bottom")}
+        >
+          {hasBottomPanels ? (
+            <div
+              className="timeline-resizer timeline-resizer-top"
+              onPointerDown={(event) => beginUiResize(event, "timeline-height")}
+              aria-label="Resize bottom zone"
+            />
+          ) : null}
+          {renderZonePanels("bottom")}
+          {renderDropHint("bottom", "bottom")}
+        </section>
       ) : null}
-
-      <section
-        className={`dock-zone dock-zone-bottom ${dragOverTarget?.zone === "bottom" ? "drop-active" : ""}`}
-        onDragOver={(event) => onDockTargetDragOver(event, "bottom")}
-        onDrop={(event) => onDockTargetDrop(event, "bottom")}
-      >
-        {renderZonePanels("bottom")}
-      </section>
 
       {Object.entries(detachedPanelHosts).map(([panelId, host]) => (
         host
@@ -2913,8 +3293,8 @@ function App() {
 
       {activeLayer ? (
         <div className="active-layer-tag">
-          Active Draw Layer: {activeLayer.name}
-          {activeVideoLayer ? ` | Active Video Layer: ${activeVideoLayer.name}` : ""}
+          Active annotation layer: {activeLayer.name}
+          {activeVideoLayer ? ` | Active video layer: ${activeVideoLayer.name}` : ""}
         </div>
       ) : null}
     </div>

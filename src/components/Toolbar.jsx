@@ -1,4 +1,12 @@
 import { PRESSURE_PRESETS, TOOL_BRUSH, TOOL_ERASER } from "../constants";
+import {
+  Button,
+  FormControlLabel,
+  Slider,
+  Stack,
+  Switch,
+  Typography
+} from "@mui/material";
 
 function Toolbar({
   brush,
@@ -31,30 +39,40 @@ function Toolbar({
 
   return (
     <aside className="toolbar-panel">
-      <h2>Tools</h2>
+      <Typography variant="h6" component="h2" sx={{ mb: 1.5 }}>
+        Drawing tools
+      </Typography>
 
       <div className="control-group">
-        <label>Tool</label>
-        <div className="tool-row">
-          <button
+        <Typography variant="subtitle2" color="text.secondary">
+          Tool
+        </Typography>
+        <Stack className="tool-row" direction="row" gap={1}>
+          <Button
+            size="small"
+            variant={brush.tool === TOOL_BRUSH ? "contained" : "outlined"}
             className={brush.tool === TOOL_BRUSH ? "active" : ""}
             onClick={() => onBrushChange({ tool: TOOL_BRUSH })}
             disabled={!canDraw}
           >
             Brush
-          </button>
-          <button
+          </Button>
+          <Button
+            size="small"
+            variant={brush.tool === TOOL_ERASER ? "contained" : "outlined"}
             className={brush.tool === TOOL_ERASER ? "active" : ""}
             onClick={() => onBrushChange({ tool: TOOL_ERASER })}
             disabled={!canDraw}
           >
             Eraser
-          </button>
-        </div>
+          </Button>
+        </Stack>
       </div>
 
       <div className="control-group">
-        <label htmlFor="brush-color">Color</label>
+        <Typography variant="subtitle2" color="text.secondary" component="label" htmlFor="brush-color">
+          Color
+        </Typography>
         <input
           id="brush-color"
           type="color"
@@ -65,43 +83,46 @@ function Toolbar({
       </div>
 
       <div className="control-group">
-        <label htmlFor="brush-size">Size ({brush.size.toFixed(1)})</label>
-        <input
+        <Typography variant="subtitle2" color="text.secondary" component="label" htmlFor="brush-size">
+          Size ({brush.size.toFixed(1)})
+        </Typography>
+        <Slider
           id="brush-size"
-          type="range"
           min={1}
           max={80}
           step={0.5}
           value={brush.size}
-          onChange={(event) => onBrushChange({ size: Number(event.target.value) })}
+          onChange={(_, value) => onBrushChange({ size: Number(value) })}
           disabled={!canDraw}
         />
       </div>
 
       <div className="control-group">
-        <label htmlFor="brush-opacity">Opacity ({brush.opacity.toFixed(2)})</label>
-        <input
+        <Typography variant="subtitle2" color="text.secondary" component="label" htmlFor="brush-opacity">
+          Opacity ({brush.opacity.toFixed(2)})
+        </Typography>
+        <Slider
           id="brush-opacity"
-          type="range"
           min={0.05}
           max={1}
           step={0.01}
           value={brush.opacity}
-          onChange={(event) => onBrushChange({ opacity: Number(event.target.value) })}
+          onChange={(_, value) => onBrushChange({ opacity: Number(value) })}
           disabled={!canDraw || brush.tool === TOOL_ERASER}
         />
       </div>
 
       <div className="control-group checkbox-group">
-        <label>
-          <input
-            type="checkbox"
+        <FormControlLabel
+          control={
+            <Switch
             checked={brush.pressureEnabled}
             onChange={(event) => onBrushChange({ pressureEnabled: event.target.checked })}
             disabled={!canDraw}
-          />
-          Use pressure (pen tablets)
-        </label>
+            />
+          }
+          label="Use stylus pressure"
+        />
       </div>
 
       {brush.pressureEnabled ? (
@@ -115,72 +136,73 @@ function Toolbar({
               </span>
               {isMousePressureFallback ? (
                 <span className="pressure-warning">
-                  Mouse emulation detected. Enable Windows Ink in the Huion driver/app profile.
+                  Mouse pressure emulation detected. Enable Windows Ink in your tablet driver profile.
                 </span>
               ) : null}
             </div>
           </div>
 
           <div className="control-group">
-            <label>Pressure Presets</label>
-            <div className="tool-row wrap">
+            <Typography variant="subtitle2" color="text.secondary">
+              Pressure Presets
+            </Typography>
+            <Stack className="tool-row wrap" direction="row" gap={1}>
               {PRESSURE_PRESETS.map((preset) => (
-                <button
+                <Button
                   key={preset.id}
                   type="button"
+                  size="small"
+                  variant="outlined"
                   onClick={() => onBrushChange(preset.values)}
                   disabled={!canDraw}
                 >
                   {preset.label}
-                </button>
+                </Button>
               ))}
-            </div>
+            </Stack>
           </div>
 
           <div className="control-group">
-            <label htmlFor="pressure-sensitivity">
+            <Typography variant="subtitle2" color="text.secondary" component="label" htmlFor="pressure-sensitivity">
               Pressure Sensitivity ({Number(brush.pressureSensitivity || 1).toFixed(2)})
-            </label>
-            <input
+            </Typography>
+            <Slider
               id="pressure-sensitivity"
-              type="range"
               min={0.2}
               max={4}
               step={0.05}
               value={Number(brush.pressureSensitivity) || 1}
-              onChange={(event) => onBrushChange({ pressureSensitivity: Number(event.target.value) })}
+              onChange={(_, value) => onBrushChange({ pressureSensitivity: Number(value) })}
               disabled={!canDraw}
             />
           </div>
 
           <div className="control-group">
-            <label htmlFor="pressure-curve">
+            <Typography variant="subtitle2" color="text.secondary" component="label" htmlFor="pressure-curve">
               Pressure Curve ({Number(brush.pressureCurve || 1).toFixed(2)})
-            </label>
-            <input
+            </Typography>
+            <Slider
               id="pressure-curve"
-              type="range"
               min={0.2}
               max={4}
               step={0.05}
               value={Number(brush.pressureCurve) || 1}
-              onChange={(event) => onBrushChange({ pressureCurve: Number(event.target.value) })}
+              onChange={(_, value) => onBrushChange({ pressureCurve: Number(value) })}
               disabled={!canDraw}
             />
           </div>
 
           <div className="control-group">
-            <label htmlFor="pressure-min-scale">
+            <Typography variant="subtitle2" color="text.secondary" component="label" htmlFor="pressure-min-scale">
               Min Pressure Size ({Math.round((Number(brush.pressureMinScale) || 0.05) * 100)}%)
-            </label>
-            <input
+            </Typography>
+            <Slider
               id="pressure-min-scale"
-              type="range"
               min={0.02}
               max={0.95}
               step={0.01}
               value={Number(brush.pressureMinScale) || 0.05}
-              onChange={(event) => onBrushChange({ pressureMinScale: Number(event.target.value) })}
+              onChange={(_, value) => onBrushChange({ pressureMinScale: Number(value) })}
               disabled={!canDraw}
             />
           </div>
@@ -188,28 +210,29 @@ function Toolbar({
       ) : null}
 
       <div className="control-group checkbox-group">
-        <label>
-          <input
-            type="checkbox"
+        <FormControlLabel
+          control={
+            <Switch
             checked={onionSkin}
             onChange={(event) => onSetOnionSkin(event.target.checked)}
             disabled={!canDraw}
-          />
-          Onion-skin preview (previous frame)
-        </label>
+            />
+          }
+          label="Show previous frame (onion skin)"
+        />
       </div>
 
-      <div className="tool-row wrap">
-        <button onClick={onUndo} disabled={!canDraw}>
+      <Stack className="tool-row wrap" direction="row" gap={1}>
+        <Button variant="outlined" onClick={onUndo} disabled={!canDraw}>
           Undo
-        </button>
-        <button onClick={onRedo} disabled={!canDraw}>
+        </Button>
+        <Button variant="outlined" onClick={onRedo} disabled={!canDraw}>
           Redo
-        </button>
-        <button onClick={onClearLayer} disabled={!canDraw}>
+        </Button>
+        <Button variant="outlined" color="error" onClick={onClearLayer} disabled={!canDraw}>
           Clear Layer
-        </button>
-      </div>
+        </Button>
+      </Stack>
     </aside>
   );
 }

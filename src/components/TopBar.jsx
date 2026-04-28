@@ -1,3 +1,13 @@
+import {
+  Box,
+  Button,
+  FormControl,
+  MenuItem,
+  Select,
+  Stack,
+  Typography
+} from "@mui/material";
+
 function TopBar({
   projectName,
   status,
@@ -16,43 +26,53 @@ function TopBar({
 }) {
   return (
     <header className="top-bar">
-      <div className="actions-row">
-        <button onClick={onOpenVideo}>Open Video</button>
-        <button onClick={onAddVideo} disabled={!canAddVideo}>
-          Add Video
-        </button>
-        <button onClick={onSaveProject} disabled={disabled}>
-          Save Project
-        </button>
-        <button onClick={onLoadProject}>Load Project</button>
-        <button onClick={onExportVideo} disabled={disabled || exportState.running}>
-          {exportState.running ? "Exporting..." : "Export Video"}
-        </button>
-        <button onClick={onTogglePreviewDetach} disabled={disabled}>
-          {isPreviewDetached ? "Dock Preview" : "Undock Preview"}
-        </button>
-        <label className="preview-scale-control" htmlFor="preview-scale-select">
-          Preview
-          <select
+      <Stack className="actions-row" direction="row" flexWrap="wrap" gap={1}>
+        <Button variant="contained" onClick={onOpenVideo}>
+          Open video
+        </Button>
+        <Button variant="outlined" onClick={onAddVideo} disabled={!canAddVideo}>
+          Add clip
+        </Button>
+        <Button variant="outlined" onClick={onSaveProject} disabled={disabled}>
+          Save project
+        </Button>
+        <Button variant="outlined" onClick={onLoadProject}>
+          Open project
+        </Button>
+        <Button variant="contained" color="secondary" onClick={onExportVideo} disabled={disabled || exportState.running}>
+          {exportState.running ? "Exporting..." : "Export video"}
+        </Button>
+        <Button variant="text" onClick={onTogglePreviewDetach} disabled={disabled}>
+          {isPreviewDetached ? "Dock preview" : "Detach preview"}
+        </Button>
+        <FormControl size="small" sx={{ minWidth: 120 }}>
+          <Typography variant="caption" sx={{ color: "text.secondary", mb: 0.5 }}>
+            Preview
+          </Typography>
+          <Select
             id="preview-scale-select"
             value={String(previewScale)}
             onChange={(event) => onPreviewScaleChange?.(Number(event.target.value))}
           >
-            <option value="1">1x</option>
-            <option value="0.75">3/4x</option>
-            <option value="0.5">1/2x</option>
-            <option value="0.25">1/4x</option>
-          </select>
-        </label>
-      </div>
+            <MenuItem value="1">1x</MenuItem>
+            <MenuItem value="0.75">3/4x</MenuItem>
+            <MenuItem value="0.5">1/2x</MenuItem>
+            <MenuItem value="0.25">1/4x</MenuItem>
+          </Select>
+        </FormControl>
+      </Stack>
 
-      <div className="project-meta">
-        <strong>{projectName || "No video loaded"}</strong>
-        <span>{status}</span>
+      <Box className="project-meta">
+        <Typography variant="subtitle1" component="strong">
+          {projectName || "No video clip loaded"}
+        </Typography>
+        <Typography variant="body2">{status}</Typography>
         {exportState.running ? (
-          <span>Export Progress: {(exportState.progress * 100).toFixed(1)}%</span>
+          <Typography variant="caption">
+            Export Progress: {(exportState.progress * 100).toFixed(1)}%
+          </Typography>
         ) : null}
-      </div>
+      </Box>
     </header>
   );
 }
