@@ -365,11 +365,9 @@ function seekVideoElement(video, targetSeconds, options = {}) {
 
   video.addEventListener("seeked", onSeeked, { once: true });
 
-  // Some containers/codecs can delay `seeked`; keep pending seek alive longer
-  // to avoid dropping back to stale clip-time mapping mid-transition.
   fallbackId = window.setTimeout(() => {
     cleanup();
-  }, 900);
+  }, 250);
 
   try {
     video.currentTime = desiredSeconds;
@@ -874,20 +872,9 @@ function App() {
         const orderedClips = sortVideoClips(videoClipsRef.current);
         const activeClip = orderedClips.find((clip) => clip.id === currentVideoClipIdRef.current) || null;
         const videoLocalMs = (Number(video.currentTime) || 0) * 1000;
-        const safeFps = Math.max(videoMetaRef.current.fps || 30, 1);
-        const mappingToleranceMs = (1000 / safeFps) * 4;
-        const activeLocalRange = activeClip
-          ? clipLocalRangeMs(activeClip, Number.isFinite(Number(video.duration)) ? Number(video.duration) * 1000 : 0)
-          : null;
-        const hasReliableActiveMapping = Boolean(
-          activeClip
-          && activeLocalRange
-          && videoLocalMs >= (activeLocalRange.startMs - mappingToleranceMs)
-          && videoLocalMs <= (activeLocalRange.endMs + mappingToleranceMs)
-        );
-        const derivedGlobalMs = hasReliableActiveMapping
+        const derivedGlobalMs = activeClip
           ? (Number(activeClip.timelineStartMs) || 0) + (videoLocalMs - (Number(activeClip.sourceStartMs) || 0))
-          : Math.max(0, Number(playheadMsRef.current) || 0);
+          : videoLocalMs;
         let globalMs = derivedGlobalMs;
 
         if (isPlaying) {
