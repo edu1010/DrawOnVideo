@@ -137,6 +137,103 @@ button.danger {
   min-height: 0;
 }
 
+.dock-zone {
+  min-height: 0;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dock-zone-left,
+.dock-zone-right {
+  overflow: auto;
+}
+
+.dock-zone-bottom {
+  padding: 10px 16px 12px;
+  border-top: 1px solid var(--line);
+  background: rgba(8, 15, 24, 0.82);
+  backdrop-filter: blur(8px);
+}
+
+.dock-zone.drop-active {
+  box-shadow: inset 0 0 0 1px rgba(118, 184, 245, 0.45);
+  background: rgba(31, 54, 77, 0.18);
+}
+
+.dock-panel-frame {
+  border: 1px solid rgba(53, 82, 115, 0.95);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(11, 20, 31, 0.84);
+  min-height: 0;
+}
+
+.dock-panel-frame.drop-active {
+  border-color: #79b8f3;
+  box-shadow: 0 0 0 1px rgba(121, 184, 243, 0.4);
+}
+
+.dock-panel-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(57, 86, 120, 0.85);
+  background: linear-gradient(180deg, rgba(30, 49, 71, 0.96), rgba(20, 34, 50, 0.96));
+  cursor: move;
+  user-select: none;
+}
+
+.dock-panel-titlebar strong {
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+  color: #c7ddf6;
+}
+
+.dock-panel-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.dock-panel-actions button {
+  padding: 5px 8px;
+  font-size: 0.76rem;
+}
+
+.dock-panel-body {
+  min-height: 0;
+}
+
+.panel-tools .toolbar-panel,
+.panel-layers .layers-panel {
+  border-radius: 0;
+  border: 0;
+}
+
+.panel-timeline .timeline-bar {
+  border-top: 0;
+  padding: 10px;
+}
+
+.dock-zone-bottom .dock-panel-frame {
+  max-width: 100%;
+}
+
+.is-detached {
+  border-radius: 0;
+  border: 0;
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+.is-detached .dock-panel-body {
+  overflow: auto;
+}
+
 .panel-resizer {
   position: relative;
   width: 8px;

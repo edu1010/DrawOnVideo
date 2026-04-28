@@ -51,6 +51,44 @@ import {
 
 const desktopAPI = window.desktopAPI;
 const PREVIEW_SCALES = [1, 0.75, 0.5, 0.25];
+const DOCK_ZONES = ["left", "right", "bottom"];
+const DEFAULT_DOCK_LAYOUT = {
+  left: ["tools"],
+  right: ["layers"],
+  bottom: ["timeline"]
+};
+const PANEL_TITLES = {
+  tools: "Tools",
+  layers: "Layers",
+  timeline: "Timeline"
+};
+
+function removePanelFromLayout(layout, panelId) {
+  const next = {
+    left: [...(layout.left || [])],
+    right: [...(layout.right || [])],
+    bottom: [...(layout.bottom || [])]
+  };
+  for (const zone of DOCK_ZONES) {
+    next[zone] = next[zone].filter((id) => id !== panelId);
+  }
+  return next;
+}
+
+function insertPanelIntoLayout(layout, panelId, zone, index = null) {
+  if (!DOCK_ZONES.includes(zone)) {
+    return layout;
+  }
+
+  const next = removePanelFromLayout(layout, panelId);
+  const target = [...(next[zone] || [])];
+  const safeIndex = Number.isInteger(index)
+    ? clamp(index, 0, target.length)
+    : target.length;
+  target.splice(safeIndex, 0, panelId);
+  next[zone] = target;
+  return next;
+}
 
 function normalizePreviewScale(value) {
   const numeric = Number(value);
@@ -475,6 +513,9 @@ function App() {
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [selectedClips, setSelectedClips] = useState([]);
   const [selectedVideoClipIds, setSelectedVideoClipIds] = useState([]);
+  const [dockLayout, setDockLayout] = useState(DEFAULT_DOCK_LAYOUT);
+  const [detachedPanelHosts, setDetachedPanelHosts] = useState({});
+  const [dragOverTarget, setDragOverTarget] = useState(null);
   const [leftPanelWidth, setLeftPanelWidth] = useState(270);
   const [rightPanelWidth, setRightPanelWidth] = useState(300);
   const [timelineViewportHeight, setTimelineViewportHeight] = useState(260);
@@ -488,6 +529,8 @@ function App() {
   const previewPopoutOpenedAtRef = useRef(null);
   const previewPopoutMovedRef = useRef(false);
   const previewPopoutNearSinceRef = useRef(null);
+  const detachedPanelWindowsRef = useRef({});
+  const draggedPanelRef = useRef(null);
   const videoLayersRef = useRef(videoLayers);
   const activeVideoLayerIdRef = useRef(activeVideoLayerId);
   const videoClipsRef = useRef(videoClips);
@@ -630,6 +673,113 @@ function App() {
 
     undockPreview();
   }, [dockPreview, isPreviewDetached, undockPreview]);
+
+  const closeDetachedPanelWindow = useCallback((panelId, options = {}) => {
+    const { closeWindow = true } = options;
+    const panelWindow = detachedPanelWindowsRef.current[panelId];
+    if (panelWindow && closeWindow && !panelWindow.closed) {
+      panelWindow.close();
+    }
+    delete detachedPanelWindowsRef.current[panelId];
+    setDetachedPanelHosts((prev) => {
+      if (!prev[panelId]) {
+        return prev;
+      }
+      const next = { ...prev };
+      delete next[panelId];
+      return next;
+    });
+  }, []);
+
+  const dockPanel = useCallback((panelId, zone, index = null, options = {}) => {
+    const targetZone = DOCK_ZONES.includes(zone)
+      ? zone
+      : (panelId === "timeline" ? "bottom" : (panelId === "layers" ? "right" : "left"));
+    closeDetachedPanelWindow(panelId, options);
+    setDockLayout((prev) => insertPanelIntoLayout(prev, panelId, targetZone, index));
+  }, [closeDetachedPanelWindow]);
+
+  const undockPanel = useCallback((panelId) => {
+    const existingWindow = detachedPanelWindowsRef.current[panelId];
+    if (existingWindow && !existingWindow.closed) {
+      existingWindow.focus();
+      return;
+    }
+
+    const panelWindow = window.open(
+      "",
+      `drawonvideo-panel-${panelId}`,
+      "popup=yes,width=620,height=560"
+    );
+
+    if (!panelWindow) {
+      setStatus("Panel pop-out blocked by the system/browser.");
+      return;
+    }
+
+    const doc = panelWindow.document;
+    doc.title = `DrawOnVideo - ${PANEL_TITLES[panelId] || "Panel"}`;
+    doc.body.innerHTML = "";
+    copyDocumentStyles(doc);
+    doc.body.style.margin = "0";
+    doc.body.style.background = "#0a1320";
+    doc.body.style.overflow = "hidden";
+
+    const host = doc.createElement("div");
+    host.className = "detached-panel-root";
+    host.style.width = "100vw";
+    host.style.height = "100vh";
+    doc.body.appendChild(host);
+
+    detachedPanelWindowsRef.current[panelId] = panelWindow;
+    setDetachedPanelHosts((prev) => ({ ...prev, [panelId]: host }));
+    setDockLayout((prev) => removePanelFromLayout(prev, panelId));
+    panelWindow.focus();
+
+    const onPanelClosed = () => {
+      if (detachedPanelWindowsRef.current[panelId] === panelWindow) {
+        dockPanel(
+          panelId,
+          panelId === "timeline" ? "bottom" : (panelId === "layers" ? "right" : "left"),
+          null,
+          { closeWindow: false }
+        );
+      }
+    };
+
+    panelWindow.addEventListener("beforeunload", onPanelClosed, { once: true });
+  }, [dockPanel]);
+
+  const onPanelDragStart = useCallback((event, panelId) => {
+    draggedPanelRef.current = panelId;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", panelId);
+  }, []);
+
+  const onPanelDragEnd = useCallback(() => {
+    draggedPanelRef.current = null;
+    setDragOverTarget(null);
+  }, []);
+
+  const onDockTargetDragOver = useCallback((event, zone, index = null) => {
+    event.preventDefault();
+    setDragOverTarget({ zone, index });
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+  }, []);
+
+  const onDockTargetDrop = useCallback((event, zone, index = null) => {
+    event.preventDefault();
+    const panelId = draggedPanelRef.current
+      || event.dataTransfer.getData("text/plain")
+      || "";
+    if (!panelId) {
+      return;
+    }
+    dockPanel(panelId, zone, index);
+    onPanelDragEnd();
+  }, [dockPanel, onPanelDragEnd]);
 
   const setCompositeOpacity = useCallback((mainOpacity, blendOpacity) => {
     const safeMain = clamp(Number(mainOpacity), 0, 1);
@@ -822,6 +972,12 @@ function App() {
     const previewWindow = previewWindowRef.current;
     if (previewWindow && !previewWindow.closed) {
       previewWindow.close();
+    }
+    for (const panelId of Object.keys(detachedPanelWindowsRef.current)) {
+      const panelWindow = detachedPanelWindowsRef.current[panelId];
+      if (panelWindow && !panelWindow.closed) {
+        panelWindow.close();
+      }
     }
   }, []);
 
@@ -2530,96 +2686,34 @@ function App() {
     </div>
   );
 
-  return (
-    <div className="app-shell">
-      <TopBar
-        projectName={projectName}
-        status={status}
-        exportState={exportState}
-        previewScale={safePreviewScale}
-        isPreviewDetached={isPreviewDetached}
-        onOpenVideo={handleOpenVideo}
-        onAddVideo={handleAddVideo}
-        onSaveProject={handleSaveProject}
-        onLoadProject={handleLoadProject}
-        onExportVideo={handleOpenExportDialog}
-        onPreviewScaleChange={(nextScale) => setPreviewScale(normalizePreviewScale(nextScale))}
-        onTogglePreviewDetach={handleTogglePreviewDetach}
-        disabled={!hasVideo}
-        canAddVideo={hasVideo}
+  const panelBodies = {
+    tools: (
+      <Toolbar
+        brush={brush}
+        currentPressure={currentPressure}
+        currentPressureInput={currentPressureInput}
+        onionSkin={onionSkin}
+        onBrushChange={handleBrushChange}
+        onSetOnionSkin={setOnionSkin}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        onClearLayer={handleClearLayer}
+        canDraw={hasVideo && !exportState.running}
       />
-
-      <main
-        className="main-layout"
-        style={{
-          "--left-panel-width": `${leftPanelWidth}px`,
-          "--right-panel-width": `${rightPanelWidth}px`
-        }}
-      >
-        <Toolbar
-          brush={brush}
-          currentPressure={currentPressure}
-          currentPressureInput={currentPressureInput}
-          onionSkin={onionSkin}
-          onBrushChange={handleBrushChange}
-          onSetOnionSkin={setOnionSkin}
-          onUndo={handleUndo}
-          onRedo={handleRedo}
-          onClearLayer={handleClearLayer}
-          canDraw={hasVideo && !exportState.running}
-        />
-
-        <div
-          className="panel-resizer vertical"
-          onPointerDown={(event) => beginUiResize(event, "left-panel")}
-          title="Resize tools panel"
-        />
-
-        <section className="stage-section">
-          <div className="stage-wrapper">
-            {hasVideo ? (
-              isPreviewDetached ? (
-                <div className="empty-stage detached-stage">
-                  <p>Preview undocked in a separate window.</p>
-                  <button onClick={() => dockPreview()}>Dock Preview</button>
-                </div>
-              ) : previewStage
-            ) : (
-              <div className="empty-stage">
-                <p>Load a local video file to begin annotation.</p>
-              </div>
-            )}
-          </div>
-        </section>
-
-        <div
-          className="panel-resizer vertical"
-          onPointerDown={(event) => beginUiResize(event, "right-panel")}
-          title="Resize layers panel"
-        />
-
-        <LayersPanel
-          layers={layers}
-          activeLayerId={activeLayerId}
-          onSelectLayer={setActiveLayerId}
-          onAddLayer={handleAddLayer}
-          onDeleteLayer={handleDeleteLayer}
-          onToggleVisibility={handleToggleLayerVisibility}
-          selectedClipCount={selectedClips.length}
-          onMoveSelectedToLayer={handleMoveSelectedClipsToLayer}
-        />
-      </main>
-
-      {hasVideo && isPreviewDetached && previewPortalNode
-        ? createPortal(previewStage, previewPortalNode)
-        : null}
-
-      <div
-        className="timeline-resizer"
-        onPointerDown={(event) => beginUiResize(event, "timeline-height")}
-        title="Resize timeline"
+    ),
+    layers: (
+      <LayersPanel
+        layers={layers}
+        activeLayerId={activeLayerId}
+        onSelectLayer={setActiveLayerId}
+        onAddLayer={handleAddLayer}
+        onDeleteLayer={handleDeleteLayer}
+        onToggleVisibility={handleToggleLayerVisibility}
+        selectedClipCount={selectedClips.length}
+        onMoveSelectedToLayer={handleMoveSelectedClipsToLayer}
       />
-
+    ),
+    timeline: (
       <TimelineBar
         currentTime={currentTime}
         duration={videoMeta.duration}
@@ -2653,6 +2747,160 @@ function App() {
         viewportHeight={timelineViewportHeight}
         disabled={!hasVideo || exportState.running}
       />
+    )
+  };
+
+  const renderDockPanel = (panelId, zone, index, options = {}) => {
+    const { detached = false } = options;
+    const isDragOver = dragOverTarget?.zone === zone && dragOverTarget?.index === index;
+    const isPanelDetached = Boolean(detachedPanelHosts[panelId]);
+
+    return (
+      <div
+        key={`${zone}-${panelId}-${index}`}
+        className={`dock-panel-frame ${isDragOver ? "drop-active" : ""} ${detached ? "is-detached" : ""}`}
+        onDragOver={(event) => {
+          if (!detached) {
+            onDockTargetDragOver(event, zone, index);
+          }
+        }}
+        onDrop={(event) => {
+          if (!detached) {
+            onDockTargetDrop(event, zone, index);
+          }
+        }}
+      >
+        <div
+          className="dock-panel-titlebar"
+          draggable={!detached}
+          onDragStart={(event) => onPanelDragStart(event, panelId)}
+          onDragEnd={onPanelDragEnd}
+        >
+          <strong>{PANEL_TITLES[panelId] || panelId}</strong>
+          <div className="dock-panel-actions">
+            {detached || isPanelDetached ? (
+              <button
+                type="button"
+                onClick={() => dockPanel(panelId, panelId === "timeline" ? "bottom" : (panelId === "layers" ? "right" : "left"))}
+              >
+                Dock
+              </button>
+            ) : (
+              <button type="button" onClick={() => undockPanel(panelId)}>
+                Pop Out
+              </button>
+            )}
+          </div>
+        </div>
+        <div className={`dock-panel-body panel-${panelId}`}>
+          {panelBodies[panelId]}
+        </div>
+      </div>
+    );
+  };
+
+  const renderZonePanels = (zone) => {
+    const panelIds = dockLayout[zone] || [];
+    return panelIds.map((panelId, index) => renderDockPanel(panelId, zone, index));
+  };
+
+  return (
+    <div className="app-shell">
+      <TopBar
+        projectName={projectName}
+        status={status}
+        exportState={exportState}
+        previewScale={safePreviewScale}
+        isPreviewDetached={isPreviewDetached}
+        onOpenVideo={handleOpenVideo}
+        onAddVideo={handleAddVideo}
+        onSaveProject={handleSaveProject}
+        onLoadProject={handleLoadProject}
+        onExportVideo={handleOpenExportDialog}
+        onPreviewScaleChange={(nextScale) => setPreviewScale(normalizePreviewScale(nextScale))}
+        onTogglePreviewDetach={handleTogglePreviewDetach}
+        disabled={!hasVideo}
+        canAddVideo={hasVideo}
+      />
+
+      <main
+        className="main-layout"
+        style={{
+          "--left-panel-width": `${leftPanelWidth}px`,
+          "--right-panel-width": `${rightPanelWidth}px`
+        }}
+      >
+        <div
+          className={`dock-zone dock-zone-left ${dragOverTarget?.zone === "left" ? "drop-active" : ""}`}
+          onDragOver={(event) => onDockTargetDragOver(event, "left")}
+          onDrop={(event) => onDockTargetDrop(event, "left")}
+        >
+          {renderZonePanels("left")}
+        </div>
+
+        <div
+          className="panel-resizer vertical"
+          onPointerDown={(event) => beginUiResize(event, "left-panel")}
+          title="Resize left zone"
+        />
+
+        <section className="stage-section">
+          <div className="stage-wrapper">
+            {hasVideo ? (
+              isPreviewDetached ? (
+                <div className="empty-stage detached-stage">
+                  <p>Preview undocked in a separate window.</p>
+                  <button onClick={() => dockPreview()}>Dock Preview</button>
+                </div>
+              ) : previewStage
+            ) : (
+              <div className="empty-stage">
+                <p>Load a local video file to begin annotation.</p>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <div
+          className="panel-resizer vertical"
+          onPointerDown={(event) => beginUiResize(event, "right-panel")}
+          title="Resize right zone"
+        />
+
+        <div
+          className={`dock-zone dock-zone-right ${dragOverTarget?.zone === "right" ? "drop-active" : ""}`}
+          onDragOver={(event) => onDockTargetDragOver(event, "right")}
+          onDrop={(event) => onDockTargetDrop(event, "right")}
+        >
+          {renderZonePanels("right")}
+        </div>
+      </main>
+
+      {hasVideo && isPreviewDetached && previewPortalNode
+        ? createPortal(previewStage, previewPortalNode)
+        : null}
+
+      {(dockLayout.bottom || []).length > 0 ? (
+        <div
+          className="timeline-resizer"
+          onPointerDown={(event) => beginUiResize(event, "timeline-height")}
+          title="Resize bottom zone"
+        />
+      ) : null}
+
+      <section
+        className={`dock-zone dock-zone-bottom ${dragOverTarget?.zone === "bottom" ? "drop-active" : ""}`}
+        onDragOver={(event) => onDockTargetDragOver(event, "bottom")}
+        onDrop={(event) => onDockTargetDrop(event, "bottom")}
+      >
+        {renderZonePanels("bottom")}
+      </section>
+
+      {Object.entries(detachedPanelHosts).map(([panelId, host]) => (
+        host
+          ? createPortal(renderDockPanel(panelId, "detached", 0, { detached: true }), host, `detached-${panelId}`)
+          : null
+      ))}
 
       <ExportDialog
         open={exportDialogOpen}
