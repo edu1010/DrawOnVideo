@@ -3068,14 +3068,6 @@ function App() {
     const { detached = false } = options;
     const isDragOver = dragOverTarget?.zone === zone && dragOverTarget?.index === index;
     const isPanelDetached = Boolean(detachedPanelHosts[panelId]);
-    const dockQuickActions = (
-      <>
-        <button type="button" onClick={() => dockPanel(panelId, "top")} title="Attach to top">Top</button>
-        <button type="button" onClick={() => dockPanel(panelId, "left")} title="Attach to left">Left</button>
-        <button type="button" onClick={() => dockPanel(panelId, "right")} title="Attach to right">Right</button>
-        <button type="button" onClick={() => dockPanel(panelId, "bottom")} title="Attach to bottom">Bottom</button>
-      </>
-    );
 
     return (
       <div
@@ -3104,16 +3096,13 @@ function App() {
         >
           <strong>{PANEL_TITLES[panelId] || panelId}</strong>
           <div className="dock-panel-actions">
-            {detached || isPanelDetached ? (
-              dockQuickActions
-            ) : (
+            {!detached && !isPanelDetached ? (
               <>
-                {dockQuickActions}
                 <button type="button" onClick={() => undockPanel(panelId)}>
                   Open in separate window
                 </button>
               </>
-            )}
+            ) : null}
           </div>
         </div>
         <div className={`dock-panel-body panel-${panelId}`}>
