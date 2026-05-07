@@ -29,12 +29,14 @@ import { renderAndRecordAnnotatedVideo } from "./engine/exportRenderer";
 import { shiftStrokeInTime, splitStrokeAtTime, strokeClipWindowMs, withStrokeClipWindow } from "./utils/strokeClip";
 import {
   createVideoClip,
+  clipAudioLevelAtTimelineMs,
   clipTimelineEndMs,
   findVideoClipAtTime,
   moveVideoClip,
   moveVideoClipsToLayer,
   normalizeVideoClips,
   removeVideoClips,
+  resolveSameLayerBlend,
   sortVideoClips,
   splitVideoClip,
   totalTimelineDurationMs,
@@ -335,6 +337,14 @@ function volumeFromDb(db) {
   return Math.min(1, Math.max(0, linear));
 }
 
+function clipAudioVolumeAtTimelineMs(clip, timelineMs) {
+  if (!clip || Boolean(clip.audioMuted)) {
+    return 0;
+  }
+
+  return clamp(volumeFromDb(clip.audioGainDb) * clipAudioLevelAtTimelineMs(clip, timelineMs), 0, 1);
+}
+
 function clipLocalRangeMs(clip, videoDurationMs = 0) {
   const startMs = Math.max(0, Number(clip?.sourceStartMs) || 0);
   const explicitEnd = Number(clip?.sourceEndMs);
@@ -362,49 +372,6 @@ function clipLocalMsAtTimelineMs(clip, globalMs, videoDurationMs = 0) {
     localRange.startMs,
     localRange.endMs
   );
-}
-
-function resolveSameLayerCrossfade(clips, activeClip, globalMs) {
-  if (!activeClip) {
-    return null;
-  }
-
-  const t = Math.max(0, Number(globalMs) || 0);
-  const activeStartMs = Number(activeClip.timelineStartMs) || 0;
-  const activeEndMs = clipTimelineEndMs(activeClip);
-  const activeLayerId = String(activeClip.videoLayerId || "");
-
-  const outgoingClip = sortVideoClips(clips)
-    .filter((clip) => {
-      if (clip.id === activeClip.id || String(clip.videoLayerId || "") !== activeLayerId) {
-        return false;
-      }
-
-      const startMs = Number(clip.timelineStartMs) || 0;
-      const endMs = clipTimelineEndMs(clip);
-      return startMs <= activeStartMs && t >= startMs && t < endMs;
-    })
-    .sort((a, b) => (Number(b.timelineStartMs) || 0) - (Number(a.timelineStartMs) || 0))[0];
-
-  if (!outgoingClip) {
-    return null;
-  }
-
-  const outgoingStartMs = Number(outgoingClip.timelineStartMs) || 0;
-  const overlapStartMs = Math.max(activeStartMs, outgoingStartMs);
-  const overlapEndMs = Math.min(activeEndMs, clipTimelineEndMs(outgoingClip));
-  const overlapDurationMs = overlapEndMs - overlapStartMs;
-
-  if (overlapDurationMs <= 1 || t < overlapStartMs || t >= overlapEndMs) {
-    return null;
-  }
-
-  const progress = clamp((t - overlapStartMs) / overlapDurationMs, 0, 1);
-  return {
-    outgoingClip,
-    outgoingOpacity: 1 - progress,
-    activeOpacity: progress
-  };
 }
 
 function annotationTimelineDurationMs(layers, fps = 30) {
@@ -1076,12 +1043,16 @@ function App() {
     }
   }, []);
 
-  const hideBlendVideo = useCallback(() => {
-    setCompositeOpacity(1, 0);
+  const hideBlendVideo = useCallback((mainOpacity = 1) => {
+    setCompositeOpacity(mainOpacity, 0);
     pendingBlendSeekRef.current = null;
     const blendVideo = blendVideoRef.current;
-    if (blendVideo && !blendVideo.paused) {
-      blendVideo.pause();
+    if (blendVideo) {
+      blendVideo.muted = true;
+      blendVideo.volume = 0;
+      if (!blendVideo.paused) {
+        blendVideo.pause();
+      }
     }
   }, [setCompositeOpacity]);
 
@@ -1092,14 +1063,25 @@ function App() {
       return;
     }
 
-    const crossfade = resolveSameLayerCrossfade(videoClipsRef.current, activeClip, globalMs);
-    const outgoingClip = crossfade?.outgoingClip || null;
-    if (!outgoingClip?.url) {
+    const blendState = resolveSameLayerBlend(videoClipsRef.current, activeClip, globalMs);
+    if (!blendState) {
       hideBlendVideo();
       return;
     }
 
-    setCompositeOpacity(crossfade.activeOpacity, crossfade.outgoingOpacity);
+    const outgoingClip = blendState.outgoingClip || null;
+    const activeOpacity = clamp(Number(blendState.activeOpacity), 0, 1);
+    const outgoingOpacity = clamp(Number(blendState.outgoingOpacity), 0, 1);
+
+    if (!outgoingClip?.url || outgoingOpacity <= 0.0001) {
+      hideBlendVideo(activeOpacity);
+      return;
+    }
+
+    setCompositeOpacity(activeOpacity, outgoingOpacity);
+    const outgoingVolume = clipAudioVolumeAtTimelineMs(outgoingClip, globalMs);
+    blendVideo.muted = outgoingVolume <= 0.0001;
+    blendVideo.volume = outgoingVolume;
 
     const targetLocalMs = clipLocalMsAtTimelineMs(
       outgoingClip,
@@ -1444,21 +1426,15 @@ function App() {
   }, [hideBlendVideo, videoUrl]);
 
   const continueTimelineAfterVideoEnded = useCallback(() => {
-    const video = videoRef.current;
     const fps = Math.max(videoMetaRef.current.fps || 30, 1);
     const frameStepMs = 1000 / fps;
     const ordered = sortVideoClips(videoClipsRef.current);
     const activeClip = ordered.find((clip) => clip.id === currentVideoClipIdRef.current) || null;
     const timelineEndMs = resolveTimelineEndMs();
-    const mediaDurationMs = Number.isFinite(Number(video?.duration)) ? Number(video.duration) * 1000 : 0;
     let currentMs = Math.max(playheadMsRef.current, currentTimeRef.current * 1000);
 
     if (activeClip) {
-      const sourceStartMs = Number(activeClip.sourceStartMs) || 0;
-      const sourceEndMs = Number.isFinite(Number(activeClip.sourceEndMs))
-        ? Number(activeClip.sourceEndMs)
-        : Math.max(sourceStartMs, mediaDurationMs);
-      const activeEndMs = (Number(activeClip.timelineStartMs) || 0) + Math.max(0, sourceEndMs - sourceStartMs);
+      const activeEndMs = clipTimelineEndMs(activeClip);
       currentMs = Math.max(currentMs, activeEndMs);
     }
 
@@ -1539,12 +1515,14 @@ function App() {
         const orderedClips = sortVideoClips(videoClipsRef.current);
         const activeClip = orderedClips.find((clip) => clip.id === currentVideoClipIdRef.current) || null;
         const videoLocalMs = (Number(video.currentTime) || 0) * 1000;
+        let activeLocalRangeForTick = null;
         const derivedGlobalMs = activeClip
           ? (() => {
             const activeClipDurationMs = Number.isFinite(Number(activeClip.sourceDurationMs))
               ? Number(activeClip.sourceDurationMs)
               : 0;
             const activeLocalRange = clipLocalRangeMs(activeClip, activeClipDurationMs);
+            activeLocalRangeForTick = activeLocalRange;
             const clampedLocalMs = clamp(
               videoLocalMs,
               activeLocalRange.startMs,
@@ -1555,6 +1533,7 @@ function App() {
           })()
           : videoLocalMs;
         let globalMs = derivedGlobalMs;
+        const timelineEndMs = isPlaying ? resolveTimelineEndMs() : 0;
 
         if (isPlaying) {
           if (justResumedRef.current) {
@@ -1563,7 +1542,6 @@ function App() {
 
           playbackTickLastPerfRef.current = nowPerf;
 
-          const timelineEndMs = resolveTimelineEndMs();
           globalMs = timelineEndMs > 0
             ? Math.min(timelineEndMs, derivedGlobalMs)
             : derivedGlobalMs;
@@ -1590,6 +1568,27 @@ function App() {
           setPlayheadMs(mediaNow * 1000);
         }
 
+        if (isPlaying && activeClip && pendingVideoSeekRef.current === null) {
+          const activeEndMs = clipTimelineEndMs(activeClip);
+          const frameStepMs = 1000 / Math.max(videoMetaRef.current.fps || 30, 1);
+          const boundaryToleranceMs = Math.max(0.5, frameStepMs * 0.35);
+          const sourceEndMs = Number(activeLocalRangeForTick?.endMs);
+          const reachedTimelineEnd = activeEndMs > 0 && globalMs >= activeEndMs - boundaryToleranceMs;
+          const reachedSourceEnd = Number.isFinite(sourceEndMs) && videoLocalMs >= sourceEndMs - boundaryToleranceMs;
+
+          if ((reachedTimelineEnd || reachedSourceEnd) && (timelineEndMs <= 0 || activeEndMs < timelineEndMs - 0.5)) {
+            const nextClip = findVideoClipAtTime(orderedClips, activeEndMs + 0.5, {
+              preferredLayerId: activeVideoLayerIdRef.current,
+              layerOrderIds: (videoLayersRef.current || []).map((layer) => layer.id)
+            });
+
+            if (nextClip && nextClip.id !== activeClip.id) {
+              setPlayheadMs(activeEndMs);
+              seekGlobalTimeMs(activeEndMs, { autoplay: true });
+            }
+          }
+        }
+
         const visibleClip = findVideoClipAtTime(orderedClips, globalMs, {
           preferredLayerId: activeVideoLayerIdRef.current,
           layerOrderIds: (videoLayersRef.current || []).map((layer) => layer.id)
@@ -1597,9 +1596,10 @@ function App() {
         const audioClip = visibleClip || activeClip;
 
         if (audioClip) {
-          const isMuted = Boolean(audioClip.audioMuted);
+          const clipVolume = clipAudioVolumeAtTimelineMs(audioClip, globalMs);
+          const isMuted = Boolean(audioClip.audioMuted) || clipVolume <= 0.0001;
           video.muted = isMuted;
-          video.volume = isMuted ? 0 : volumeFromDb(audioClip.audioGainDb);
+          video.volume = isMuted ? 0 : clipVolume;
         } else {
           video.muted = false;
           video.volume = 1;
@@ -1619,9 +1619,10 @@ function App() {
           isPlaying
           && visibleClip
           && (!activeClip || visibleClip.id !== currentVideoClipIdRef.current)
+          && pendingVideoSeekRef.current === null
         ) {
           seekGlobalTimeMs(globalMs, { autoplay: true });
-        } else if (activeClip) {
+        } else if (activeClip && pendingVideoSeekRef.current === null) {
 
           syncBlendVideo(globalMs, activeClip, isPlaying && !video.paused);
         } else {
@@ -2414,6 +2415,48 @@ function App() {
     }));
   }, []);
 
+  const handleUpdateVideoClipFade = useCallback((clipId, patch) => {
+    if (!clipId || !patch || typeof patch !== "object") {
+      return;
+    }
+
+    setVideoClips((prev) => prev.map((clip) => {
+      if (clip.id !== clipId) {
+        return clip;
+      }
+
+      const timelineStartMs = Number(clip.timelineStartMs) || 0;
+      const timelineDurationMs = Number(clip.timelineDurationMs) > 0
+        ? Number(clip.timelineDurationMs)
+        : Math.max(0, (Number(clipTimelineEndMs(clip)) || timelineStartMs) - timelineStartMs);
+      const normalizeFade = (value, fallback = 0) => {
+        const safeValue = Number.isFinite(Number(value)) ? Number(value) : fallback;
+        return Math.max(0, Math.min(timelineDurationMs, safeValue));
+      };
+
+      const nextFadeInDurationMs = Object.prototype.hasOwnProperty.call(patch, "fadeInDurationMs")
+        ? normalizeFade(patch.fadeInDurationMs, 0)
+        : normalizeFade(clip.fadeInDurationMs, 0);
+      const nextFadeOutDurationMs = Object.prototype.hasOwnProperty.call(patch, "fadeOutDurationMs")
+        ? normalizeFade(patch.fadeOutDurationMs, 0)
+        : normalizeFade(clip.fadeOutDurationMs, 0);
+      const nextAudioFadeInDurationMs = Object.prototype.hasOwnProperty.call(patch, "audioFadeInDurationMs")
+        ? normalizeFade(patch.audioFadeInDurationMs, 0)
+        : normalizeFade(clip.audioFadeInDurationMs, 0);
+      const nextAudioFadeOutDurationMs = Object.prototype.hasOwnProperty.call(patch, "audioFadeOutDurationMs")
+        ? normalizeFade(patch.audioFadeOutDurationMs, 0)
+        : normalizeFade(clip.audioFadeOutDurationMs, 0);
+
+      return {
+        ...clip,
+        fadeInDurationMs: nextFadeInDurationMs,
+        fadeOutDurationMs: nextFadeOutDurationMs,
+        audioFadeInDurationMs: nextAudioFadeInDurationMs,
+        audioFadeOutDurationMs: nextAudioFadeOutDurationMs
+      };
+    }));
+  }, []);
+
   const handleMoveVideoClip = useCallback((clipId, nextWindow) => {
     setVideoClips((prev) => moveVideoClip(prev, clipId, Number(nextWindow?.startMs) || 0));
   }, []);
@@ -2843,7 +2886,6 @@ function App() {
           ref={blendVideoRef}
           className="video-layer blend-video-layer"
           src={blendVideoUrl}
-          muted
           playsInline
           style={{ opacity: blendVideoOpacity }}
           onLoadedMetadata={(event) => {
@@ -3052,6 +3094,7 @@ function App() {
         onMoveSelectedVideoToActiveLayer={handleMoveSelectedVideoToActiveLayer}
         onAssignVideoClipLayer={handleAssignVideoClipLayer}
         onUpdateVideoClipAudio={handleUpdateVideoClipAudio}
+        onUpdateVideoClipFade={handleUpdateVideoClipFade}
         onMoveVideoClip={handleMoveVideoClip}
         onTrimVideoClip={handleTrimVideoClip}
         onSplitVideoClip={handleSplitVideoClip}

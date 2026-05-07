@@ -5,6 +5,12 @@ function safeNumber(value, fallback = 0) {
   return Number.isFinite(num) ? num : fallback;
 }
 
+function normalizeFadeDurationMs(value, clipDurationMs) {
+  const duration = Math.max(0, safeNumber(clipDurationMs));
+  const fade = safeNumber(value, 0);
+  return Math.max(0, Math.min(duration, fade));
+}
+
 function clipSourceRangeMs(clip) {
   const start = Math.max(0, safeNumber(clip?.sourceStartMs));
   const rawEnd = Number(clip?.sourceEndMs);
@@ -42,6 +48,98 @@ export function clipTimelineEndMs(clip) {
   return safeNumber(clip?.timelineStartMs) + clipTimelineDurationMs(clip);
 }
 
+export function clipFadeInDurationMs(clip) {
+  return normalizeFadeDurationMs(clip?.fadeInDurationMs, clipTimelineDurationMs(clip));
+}
+
+export function clipFadeOutDurationMs(clip) {
+  return normalizeFadeDurationMs(clip?.fadeOutDurationMs, clipTimelineDurationMs(clip));
+}
+
+export function clipAudioFadeInDurationMs(clip) {
+  return normalizeFadeDurationMs(clip?.audioFadeInDurationMs, clipTimelineDurationMs(clip));
+}
+
+export function clipAudioFadeOutDurationMs(clip) {
+  return normalizeFadeDurationMs(clip?.audioFadeOutDurationMs, clipTimelineDurationMs(clip));
+}
+
+function clipFadeLevelAtTimelineMs(clip, timelineMs, fadeInMs, fadeOutMs) {
+  if (!clip) {
+    return 0;
+  }
+
+  const t = safeNumber(timelineMs);
+  const startMs = safeNumber(clip.timelineStartMs);
+  const endMs = clipTimelineEndMs(clip);
+  if (endMs <= startMs || t < startMs || t >= endMs) {
+    return 0;
+  }
+
+  let level = 1;
+
+  if (fadeInMs > 0) {
+    const fadeInProgress = (t - startMs) / fadeInMs;
+    level = Math.min(level, Math.max(0, Math.min(1, fadeInProgress)));
+  }
+
+  if (fadeOutMs > 0) {
+    const fadeOutProgress = (endMs - t) / fadeOutMs;
+    level = Math.min(level, Math.max(0, Math.min(1, fadeOutProgress)));
+  }
+
+  return Math.max(0, Math.min(1, level));
+}
+
+export function clipOpacityAtTimelineMs(clip, timelineMs) {
+  return clipFadeLevelAtTimelineMs(
+    clip,
+    timelineMs,
+    clipFadeInDurationMs(clip),
+    clipFadeOutDurationMs(clip)
+  );
+}
+
+export function clipAudioLevelAtTimelineMs(clip, timelineMs) {
+  return clipFadeLevelAtTimelineMs(
+    clip,
+    timelineMs,
+    clipAudioFadeInDurationMs(clip),
+    clipAudioFadeOutDurationMs(clip)
+  );
+}
+
+export function resolveSameLayerBlend(clips, activeClip, timelineMs) {
+  if (!activeClip) {
+    return null;
+  }
+
+  const t = Math.max(0, safeNumber(timelineMs));
+  const activeStartMs = safeNumber(activeClip.timelineStartMs);
+  const activeLayerId = String(activeClip.videoLayerId || "");
+
+  const outgoingClip = sortVideoClips(clips)
+    .filter((clip) => {
+      if (clip.id === activeClip.id || String(clip.videoLayerId || "") !== activeLayerId) {
+        return false;
+      }
+
+      const startMs = safeNumber(clip.timelineStartMs);
+      const endMs = clipTimelineEndMs(clip);
+      return startMs <= activeStartMs && t >= startMs && t < endMs;
+    })
+    .sort((a, b) => safeNumber(b.timelineStartMs) - safeNumber(a.timelineStartMs))[0] || null;
+
+  const activeOpacity = clipOpacityAtTimelineMs(activeClip, t);
+  const outgoingOpacity = outgoingClip ? clipOpacityAtTimelineMs(outgoingClip, t) : 0;
+
+  return {
+    activeOpacity,
+    outgoingClip: outgoingOpacity > 0.0001 ? outgoingClip : null,
+    outgoingOpacity: outgoingOpacity > 0.0001 ? outgoingOpacity : 0
+  };
+}
+
 export function sortVideoClips(clips) {
   return [...(clips || [])].sort((a, b) => {
     const delta = safeNumber(a.timelineStartMs) - safeNumber(b.timelineStartMs);
@@ -73,6 +171,10 @@ export function createVideoClip({
   videoLayerId = "",
   audioMuted = false,
   audioGainDb = 0,
+  fadeInDurationMs = 0,
+  fadeOutDurationMs = 0,
+  audioFadeInDurationMs = 0,
+  audioFadeOutDurationMs = 0,
   fps,
   width,
   height
@@ -101,6 +203,10 @@ export function createVideoClip({
     videoLayerId: String(videoLayerId || ""),
     audioMuted: Boolean(audioMuted),
     audioGainDb: Math.min(18, Math.max(-60, safeNumber(audioGainDb, 0))),
+    fadeInDurationMs: normalizeFadeDurationMs(fadeInDurationMs, normalizedTimelineDuration),
+    fadeOutDurationMs: normalizeFadeDurationMs(fadeOutDurationMs, normalizedTimelineDuration),
+    audioFadeInDurationMs: normalizeFadeDurationMs(audioFadeInDurationMs, normalizedTimelineDuration),
+    audioFadeOutDurationMs: normalizeFadeDurationMs(audioFadeOutDurationMs, normalizedTimelineDuration),
     fps: safeNumber(fps, 30),
     width: safeNumber(width, 1280),
     height: safeNumber(height, 720)
@@ -233,13 +339,21 @@ export function trimVideoClip(clips, clipId, nextWindow, minDurationMs = 120) {
 
     const newSrcEnd = newSrcStart + newSourceDuration;
     const normalizedTimelineDuration = Math.max(minDurationMs, newEnd - newStart);
+    const nextFadeInDurationMs = normalizeFadeDurationMs(clip.fadeInDurationMs, normalizedTimelineDuration);
+    const nextFadeOutDurationMs = normalizeFadeDurationMs(clip.fadeOutDurationMs, normalizedTimelineDuration);
+    const nextAudioFadeInDurationMs = normalizeFadeDurationMs(clip.audioFadeInDurationMs, normalizedTimelineDuration);
+    const nextAudioFadeOutDurationMs = normalizeFadeDurationMs(clip.audioFadeOutDurationMs, normalizedTimelineDuration);
 
     return {
       ...clip,
       timelineStartMs: newStart,
       sourceStartMs: newSrcStart,
       sourceEndMs: newSrcEnd,
-      timelineDurationMs: normalizedTimelineDuration
+      timelineDurationMs: normalizedTimelineDuration,
+      fadeInDurationMs: nextFadeInDurationMs,
+      fadeOutDurationMs: nextFadeOutDurationMs,
+      audioFadeInDurationMs: nextAudioFadeInDurationMs,
+      audioFadeOutDurationMs: nextAudioFadeOutDurationMs
     };
   });
 }
@@ -276,6 +390,10 @@ export function splitVideoClip(clips, clipId, cutMs, minDurationMs = 120) {
     const firstSrcEnd = srcStart + firstSourceDuration;
     const secondSrcStart = firstSrcEnd;
     const secondSrcEnd = secondSrcStart + secondSourceDuration;
+    const clipFadeInMs = clipFadeInDurationMs(clip);
+    const clipFadeOutMs = clipFadeOutDurationMs(clip);
+    const clipAudioFadeInMs = clipAudioFadeInDurationMs(clip);
+    const clipAudioFadeOutMs = clipAudioFadeOutDurationMs(clip);
 
     const first = {
       ...clip,
@@ -283,7 +401,11 @@ export function splitVideoClip(clips, clipId, cutMs, minDurationMs = 120) {
       sourceStartMs: srcStart,
       sourceEndMs: firstSrcEnd,
       timelineStartMs: start,
-      timelineDurationMs: firstTimelineDuration
+      timelineDurationMs: firstTimelineDuration,
+      fadeInDurationMs: normalizeFadeDurationMs(clipFadeInMs, firstTimelineDuration),
+      fadeOutDurationMs: 0,
+      audioFadeInDurationMs: normalizeFadeDurationMs(clipAudioFadeInMs, firstTimelineDuration),
+      audioFadeOutDurationMs: 0
     };
 
     const second = {
@@ -292,7 +414,11 @@ export function splitVideoClip(clips, clipId, cutMs, minDurationMs = 120) {
       sourceStartMs: secondSrcStart,
       sourceEndMs: secondSrcEnd,
       timelineStartMs: safeCut,
-      timelineDurationMs: secondTimelineDuration
+      timelineDurationMs: secondTimelineDuration,
+      fadeInDurationMs: 0,
+      fadeOutDurationMs: normalizeFadeDurationMs(clipFadeOutMs, secondTimelineDuration),
+      audioFadeInDurationMs: 0,
+      audioFadeOutDurationMs: normalizeFadeDurationMs(clipAudioFadeOutMs, secondTimelineDuration)
     };
 
     next.push(first, second);
@@ -352,6 +478,10 @@ export function normalizeVideoClips(rawClips) {
         videoLayerId: clip.videoLayerId,
         audioMuted: clip.audioMuted,
         audioGainDb: clip.audioGainDb,
+        fadeInDurationMs: clip.fadeInDurationMs,
+        fadeOutDurationMs: clip.fadeOutDurationMs,
+        audioFadeInDurationMs: clip.audioFadeInDurationMs,
+        audioFadeOutDurationMs: clip.audioFadeOutDurationMs,
         fps: clip.fps,
         width: clip.width,
         height: clip.height

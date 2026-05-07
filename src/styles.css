@@ -866,6 +866,24 @@ button:not(.MuiButtonBase-root).danger {
   color: #e4f5ff;
 }
 
+.timeline-audio-clip {
+  background: linear-gradient(180deg, rgba(68, 214, 166, 0.3), rgba(39, 143, 121, 0.26));
+  border-color: #44d6a6 !important;
+  color: #dffcf3;
+}
+
+.timeline-audio-track {
+  background:
+    linear-gradient(90deg, rgba(68, 214, 166, 0.12), transparent 42%),
+    rgba(12, 23, 28, 0.74);
+}
+
+.timeline-label-audio {
+  color: #b8f1df;
+  background: linear-gradient(180deg, rgba(29, 61, 55, 0.82), rgba(16, 42, 39, 0.9));
+  border-color: rgba(68, 214, 166, 0.38);
+}
+
 .video-clip-wave {
   position: absolute;
   inset: 4px 12px 4px 12px;
@@ -876,6 +894,11 @@ button:not(.MuiButtonBase-root).danger {
   pointer-events: none;
   opacity: 0.5;
   z-index: 0;
+}
+
+.video-clip-wave.audio-wave {
+  inset: 7px 18px 7px 18px;
+  opacity: 0.72;
 }
 
 .video-clip-wave span {
@@ -933,6 +956,73 @@ button:not(.MuiButtonBase-root).danger {
 
 .clip-handle.right {
   right: 0;
+}
+
+.clip-fade-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.clip-fade-line {
+  stroke: rgba(234, 246, 255, 0.95);
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+
+.clip-fade-handle {
+  position: absolute;
+  top: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  border: 1px solid rgba(182, 229, 255, 0.95);
+  background: rgba(235, 248, 255, 0.95);
+  transform: translate(-50%, 0);
+  cursor: ew-resize;
+  z-index: 5;
+  box-shadow: 0 0 0 1px rgba(77, 135, 177, 0.6);
+}
+
+.clip-fade-handle.fade-in {
+  background: rgba(216, 243, 255, 0.95);
+}
+
+.clip-fade-handle.fade-out {
+  background: rgba(201, 238, 255, 0.95);
+}
+
+.audio-volume-envelope {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+}
+
+.audio-volume-hitbox {
+  pointer-events: stroke;
+  stroke: transparent;
+  stroke-width: 18;
+  cursor: ns-resize;
+}
+
+.audio-volume-line {
+  pointer-events: none;
+  stroke: rgba(255, 255, 255, 0.92);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+}
+
+.audio-volume-handle {
+  pointer-events: auto;
+  fill: #ffffff;
+  stroke: rgba(38, 96, 84, 0.95);
+  stroke-width: 1.5;
+  cursor: ns-resize;
+}
+
+.audio-title {
+  opacity: 0.82;
 }
 
 .timeline-playhead {

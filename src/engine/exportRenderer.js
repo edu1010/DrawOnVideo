@@ -1,5 +1,11 @@
 import { createRenderState, renderAnnotationOverlay } from "./rendering";
-import { clipTimelineEndMs, findVideoClipAtTime, sortVideoClips, totalTimelineDurationMs } from "../utils/videoClipOps";
+import {
+  clipOpacityAtTimelineMs,
+  findVideoClipAtTime,
+  resolveSameLayerBlend,
+  sortVideoClips,
+  totalTimelineDurationMs
+} from "../utils/videoClipOps";
 
 function waitForEvent(target, eventName) {
   return new Promise((resolve, reject) => {
@@ -69,48 +75,6 @@ function clipLocalMsAtTimelineMs(clip, globalMs, videoDurationMs = 0) {
   const localRange = clipLocalRangeMs(clip, videoDurationMs);
   const localMs = localRange.startMs + (Math.max(0, Number(globalMs) || 0) - timelineStartMs);
   return Math.min(localRange.endMs, Math.max(localRange.startMs, localMs));
-}
-
-function resolveSameLayerCrossfade(clips, activeClip, globalMs) {
-  if (!activeClip) {
-    return null;
-  }
-
-  const t = Math.max(0, Number(globalMs) || 0);
-  const activeStartMs = Number(activeClip.timelineStartMs) || 0;
-  const activeEndMs = clipTimelineEndMs(activeClip);
-  const activeLayerId = String(activeClip.videoLayerId || "");
-
-  const outgoingClip = sortVideoClips(clips)
-    .filter((clip) => {
-      if (clip.id === activeClip.id || String(clip.videoLayerId || "") !== activeLayerId) {
-        return false;
-      }
-
-      const startMs = Number(clip.timelineStartMs) || 0;
-      const endMs = clipTimelineEndMs(clip);
-      return startMs <= activeStartMs && t >= startMs && t < endMs;
-    })
-    .sort((a, b) => (Number(b.timelineStartMs) || 0) - (Number(a.timelineStartMs) || 0))[0];
-
-  if (!outgoingClip) {
-    return null;
-  }
-
-  const outgoingStartMs = Number(outgoingClip.timelineStartMs) || 0;
-  const overlapStartMs = Math.max(activeStartMs, outgoingStartMs);
-  const overlapEndMs = Math.min(activeEndMs, clipTimelineEndMs(outgoingClip));
-  const overlapDurationMs = overlapEndMs - overlapStartMs;
-
-  if (overlapDurationMs <= 1 || t < overlapStartMs || t >= overlapEndMs) {
-    return null;
-  }
-
-  const progress = Math.min(1, Math.max(0, (t - overlapStartMs) / overlapDurationMs));
-  return {
-    outgoingClip,
-    outgoingOpacity: 1 - progress
-  };
 }
 
 export async function renderAndRecordAnnotatedVideo({
@@ -248,11 +212,20 @@ export async function renderAndRecordAnnotatedVideo({
 
     const activeClip = findVideoClipAtTime(timelineClips, globalMs, { layerOrderIds });
     if (activeClip) {
-      await drawClipFrame(exportVideo, activeClip, globalMs, 1);
+      const blendState = resolveSameLayerBlend(timelineClips, activeClip, globalMs);
+      const activeOpacity = blendState
+        ? Math.max(0, Math.min(1, Number(blendState.activeOpacity)))
+        : clipOpacityAtTimelineMs(activeClip, globalMs);
+      const outgoingClip = blendState?.outgoingClip || null;
+      const outgoingOpacity = blendState
+        ? Math.max(0, Math.min(1, Number(blendState.outgoingOpacity)))
+        : 0;
 
-      const crossfade = resolveSameLayerCrossfade(timelineClips, activeClip, globalMs);
-      if (crossfade?.outgoingClip) {
-        await drawClipFrame(blendVideo, crossfade.outgoingClip, globalMs, crossfade.outgoingOpacity);
+      if (outgoingClip && outgoingOpacity > 0.0001) {
+        await drawClipFrame(blendVideo, outgoingClip, globalMs, outgoingOpacity);
+      }
+      if (activeOpacity > 0.0001) {
+        await drawClipFrame(exportVideo, activeClip, globalMs, activeOpacity);
       }
     }
 

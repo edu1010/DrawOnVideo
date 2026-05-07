@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   FormControlLabel,
@@ -11,9 +11,16 @@ import {
 } from "@mui/material";
 import { formatTime } from "../utils/time";
 import { strokeClipWindowMs } from "../utils/strokeClip";
-import { clipTimelineEndMs } from "../utils/videoClipOps";
+import {
+  clipAudioFadeInDurationMs,
+  clipAudioFadeOutDurationMs,
+  clipFadeInDurationMs,
+  clipFadeOutDurationMs,
+  clipTimelineEndMs
+} from "../utils/videoClipOps";
 
 const MIN_CLIP_MS = 80;
+const FADE_HANDLE_EDGE_INSET_PX = 16;
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -256,6 +263,7 @@ function TimelineBar({
   onMoveSelectedVideoToActiveLayer,
   onAssignVideoClipLayer,
   onUpdateVideoClipAudio,
+  onUpdateVideoClipFade,
   onMoveVideoClip,
   onTrimVideoClip,
   onSplitVideoClip,
@@ -459,7 +467,9 @@ function TimelineBar({
 
   function clientPointToVideoLayerId(clientX, clientY) {
     const elementAtPoint = document.elementFromPoint(clientX, clientY);
-    const trackElement = elementAtPoint?.closest?.(".timeline-video-track[data-layer-id]");
+    const trackElement = elementAtPoint?.closest?.(
+      ".timeline-video-track[data-layer-id], .timeline-audio-track[data-layer-id]"
+    );
     if (!trackElement) {
       return null;
     }
@@ -566,6 +576,24 @@ function TimelineBar({
             endMs: nextEndMs
           });
         }
+      } else if (drag.mode === "fadeIn") {
+        const clipDurationMs = Math.max(0, drag.originalEndMs - drag.originalStartMs);
+        const nextFadeInDurationMs = clamp(drag.originalFadeMs + deltaMs, 0, clipDurationMs);
+        onUpdateVideoClipFade?.(drag.targetId, {
+          [drag.fadeInKey || "fadeInDurationMs"]: nextFadeInDurationMs
+        });
+      } else if (drag.mode === "fadeOut") {
+        const clipDurationMs = Math.max(0, drag.originalEndMs - drag.originalStartMs);
+        const nextFadeOutDurationMs = clamp(drag.originalFadeMs - deltaMs, 0, clipDurationMs);
+        onUpdateVideoClipFade?.(drag.targetId, {
+          [drag.fadeOutKey || "fadeOutDurationMs"]: nextFadeOutDurationMs
+        });
+      } else if (drag.mode === "audioGain") {
+        const safeHeight = Math.max(24, Number(drag.trackHeight) || trackHeight || 56);
+        const deltaDb = ((drag.startClientY - event.clientY) / safeHeight) * 48;
+        onUpdateVideoClipAudio?.(drag.targetId, {
+          audioGainDb: clampDb(drag.originalGainDb + deltaDb)
+        });
       }
     };
 
@@ -590,7 +618,7 @@ function TimelineBar({
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
     };
-  }, [onAssignVideoClipLayer, onMoveClip, onMoveVideoClip, onTrimClip, onTrimVideoClip]);
+  }, [onAssignVideoClipLayer, onMoveClip, onMoveVideoClip, onTrimClip, onTrimVideoClip, onUpdateVideoClipAudio, onUpdateVideoClipFade, trackHeight]);
 
   function beginDrag(event, payload) {
     if (disabled) {
@@ -602,6 +630,8 @@ function TimelineBar({
       originalStartMs: payload.windowMs.clipStartMs,
       originalEndMs: payload.windowMs.clipEndMs,
       startClientX: event.clientX,
+      startClientY: event.clientY,
+      trackHeight,
       pixelsPerSecond
     };
   }
@@ -622,6 +652,305 @@ function TimelineBar({
 
     const nextSeconds = clientXToTimelineSeconds(event.clientX);
     onSeek?.(nextSeconds);
+  }
+
+  function clipTimelineMetrics(clip, fadeKind = "video") {
+    const timelineStartMs = Number(clip.timelineStartMs) || 0;
+    const timelineEndMs = Number(clipTimelineEndMs(clip)) || timelineStartMs;
+    const startSec = timelineStartMs / 1000;
+    const endSec = timelineEndMs / 1000;
+
+    if (!Number.isFinite(endSec) || endSec <= 0 || startSec >= timelineSpanSec) {
+      return null;
+    }
+
+    const safeStart = clamp(startSec, 0, timelineSpanSec);
+    const safeEnd = clamp(endSec, 0, timelineSpanSec);
+    const left = safeStart * pixelsPerSecond;
+    const width = Math.max(14, (safeEnd - safeStart) * pixelsPerSecond);
+    const isAudioFade = fadeKind === "audio";
+    const fadeInDurationMs = isAudioFade
+      ? clipAudioFadeInDurationMs(clip)
+      : clipFadeInDurationMs(clip);
+    const fadeOutDurationMs = isAudioFade
+      ? clipAudioFadeOutDurationMs(clip)
+      : clipFadeOutDurationMs(clip);
+    const maxFadePx = Math.max(0, width);
+    const fadeInPx = Math.max(
+      0,
+      Math.min(maxFadePx, (fadeInDurationMs / 1000) * pixelsPerSecond)
+    );
+    const fadeOutPx = Math.max(
+      0,
+      Math.min(maxFadePx, (fadeOutDurationMs / 1000) * pixelsPerSecond)
+    );
+    const maxHandleLeft = Math.max(1, width - 1);
+    const handleInset = Math.min(FADE_HANDLE_EDGE_INSET_PX, Math.max(1, width / 3));
+    const fadeInHandleLeft = Math.max(handleInset, fadeInPx);
+    const fadeOutHandleLeft = width - Math.max(handleInset, fadeOutPx);
+
+    return {
+      timelineStartMs,
+      timelineEndMs,
+      left,
+      width,
+      fadeInDurationMs,
+      fadeOutDurationMs,
+      fadeInPx,
+      fadeOutPx,
+      fadeInKey: isAudioFade ? "audioFadeInDurationMs" : "fadeInDurationMs",
+      fadeOutKey: isAudioFade ? "audioFadeOutDurationMs" : "fadeOutDurationMs",
+      fadeInHandleLeft: Math.max(1, Math.min(maxHandleLeft, fadeInHandleLeft)),
+      fadeOutHandleLeft: Math.max(1, Math.min(maxHandleLeft, fadeOutHandleLeft)),
+      hasFadeGuide: fadeInPx > 0.5 || fadeOutPx > 0.5
+    };
+  }
+
+  function beginLinkedClipDrag(event, clip, videoLayer, mode, metrics, extra = {}) {
+    event.stopPropagation();
+    onSelectVideoLayer?.(clip.videoLayerId || videoLayer.id);
+    onSelectVideoClip?.(
+      clip.id,
+      { additive: event.shiftKey, toggle: event.shiftKey }
+    );
+
+    beginDrag(event, {
+      kind: "video",
+      mode,
+      targetId: clip.id,
+      windowMs: {
+        clipStartMs: metrics.timelineStartMs,
+        clipEndMs: metrics.timelineEndMs
+      },
+      ...extra
+    });
+  }
+
+  function handleLinkedClipPointerDown(event, clip, videoLayer, metrics) {
+    event.stopPropagation();
+    onSelectVideoLayer?.(clip.videoLayerId || videoLayer.id);
+    onSelectVideoClip?.(
+      clip.id,
+      { additive: event.shiftKey, toggle: event.shiftKey }
+    );
+
+    if (timelineTool === "cut") {
+      const cutSeconds = clientXToTimelineSeconds(event.clientX);
+      onSplitVideoClip?.(clip.id, cutSeconds * 1000);
+      return;
+    }
+
+    beginDrag(event, {
+      kind: "video",
+      mode: "move",
+      targetId: clip.id,
+      windowMs: {
+        clipStartMs: metrics.timelineStartMs,
+        clipEndMs: metrics.timelineEndMs
+      }
+    });
+  }
+
+  function renderFadeOverlay(metrics) {
+    const { width, fadeInPx, fadeOutPx, hasFadeGuide } = metrics;
+    if (!hasFadeGuide) {
+      return null;
+    }
+
+    const safeWidth = Math.max(1, width);
+
+    return (
+      <svg
+        className="clip-fade-overlay"
+        viewBox={`0 0 ${safeWidth} 100`}
+        preserveAspectRatio="none"
+        aria-hidden
+      >
+        {fadeInPx > 0.5 ? (
+          <path
+            className="clip-fade-line"
+            d={`M 0 100 C ${fadeInPx * 0.35} 100 ${fadeInPx * 0.7} 0 ${fadeInPx} 0`}
+            vectorEffect="non-scaling-stroke"
+          />
+        ) : null}
+        {fadeOutPx > 0.5 ? (
+          <path
+            className="clip-fade-line"
+            d={`M ${safeWidth - fadeOutPx} 0 C ${safeWidth - fadeOutPx * 0.7} 0 ${safeWidth - fadeOutPx * 0.35} 100 ${safeWidth} 100`}
+            vectorEffect="non-scaling-stroke"
+          />
+        ) : null}
+      </svg>
+    );
+  }
+
+  function renderFadeHandles(clip, videoLayer, metrics) {
+    return (
+      <>
+        <div
+          className="clip-fade-handle fade-in"
+          title="Fade in"
+          style={{ left: `${metrics.fadeInHandleLeft}px` }}
+          onPointerDown={(event) => {
+            beginLinkedClipDrag(event, clip, videoLayer, "fadeIn", metrics, {
+              fadeInKey: metrics.fadeInKey,
+              originalFadeMs: metrics.fadeInDurationMs
+            });
+          }}
+        />
+
+        <div
+          className="clip-fade-handle fade-out"
+          title="Fade out"
+          style={{ left: `${metrics.fadeOutHandleLeft}px` }}
+          onPointerDown={(event) => {
+            beginLinkedClipDrag(event, clip, videoLayer, "fadeOut", metrics, {
+              fadeOutKey: metrics.fadeOutKey,
+              originalFadeMs: metrics.fadeOutDurationMs
+            });
+          }}
+        />
+      </>
+    );
+  }
+
+  function gainEnvelopeY(db) {
+    return clamp(8 + ((18 - clampDb(db)) / 78) * 84, 8, 92);
+  }
+
+  function renderVideoClip(clip, index, videoLayer) {
+    const metrics = clipTimelineMetrics(clip, "video");
+    if (!metrics) {
+      return null;
+    }
+
+    const isSelected = selectedVideoIds.has(clip.id);
+
+    return (
+      <div
+        className={`timeline-clip timeline-video-clip ${isSelected ? "selected" : ""}`}
+        key={clip.id}
+        style={{ left: `${metrics.left}px`, width: `${metrics.width}px` }}
+        onPointerDown={(event) => handleLinkedClipPointerDown(event, clip, videoLayer, metrics)}
+      >
+        <div
+          className="clip-handle left"
+          onPointerDown={(event) => beginLinkedClipDrag(event, clip, videoLayer, "trimStart", metrics)}
+        />
+
+        {renderFadeOverlay(metrics)}
+        {renderFadeHandles(clip, videoLayer, metrics)}
+
+        <span className="clip-title">{clip.name || `Video ${index + 1}`}</span>
+
+        <div
+          className="clip-handle right"
+          onPointerDown={(event) => beginLinkedClipDrag(event, clip, videoLayer, "trimEnd", metrics)}
+        />
+      </div>
+    );
+  }
+
+  function renderAudioClip(clip, index, videoLayer) {
+    const metrics = clipTimelineMetrics(clip, "audio");
+    if (!metrics) {
+      return null;
+    }
+
+    const isSelected = selectedVideoIds.has(clip.id);
+    const gainY = gainEnvelopeY(clip.audioGainDb);
+    const gainHandleX = clamp(metrics.width / 2, 8, Math.max(8, metrics.width - 8));
+    const clipWavePeaks = clipWavePeaksFromSource({
+      sourcePeaks: audioPeaksByUrl[clip.url],
+      sourceDurationMs: clip.sourceDurationMs,
+      sourceStartMs: clip.sourceStartMs,
+      sourceEndMs: clip.sourceEndMs,
+      targetBars: Math.max(12, Math.min(72, Math.round(metrics.width / 6)))
+    });
+
+    const beginGainDrag = (event) => {
+      beginLinkedClipDrag(event, clip, videoLayer, "audioGain", metrics, {
+        originalGainDb: clampDb(clip.audioGainDb)
+      });
+    };
+
+    return (
+      <div
+        className={`timeline-clip timeline-audio-clip ${isSelected ? "selected" : ""}`}
+        key={`${clip.id}-audio`}
+        style={{ left: `${metrics.left}px`, width: `${metrics.width}px` }}
+        onPointerDown={(event) => handleLinkedClipPointerDown(event, clip, videoLayer, metrics)}
+      >
+        <div
+          className="clip-handle left"
+          onPointerDown={(event) => beginLinkedClipDrag(event, clip, videoLayer, "trimStart", metrics)}
+        />
+
+        {clipWavePeaks.length > 0 ? (
+          <div className="video-clip-wave audio-wave" aria-hidden>
+            {clipWavePeaks.map((peak, peakIndex) => (
+              <span
+                key={`${clip.id}-audio-peak-${peakIndex}`}
+                style={{ height: `${Math.max(10, Math.round((Number(peak) || 0) * 100))}%` }}
+              />
+            ))}
+          </div>
+        ) : null}
+
+        {renderFadeOverlay(metrics)}
+        {renderFadeHandles(clip, videoLayer, metrics)}
+
+        <svg
+          className="audio-volume-envelope"
+          viewBox={`0 0 ${Math.max(1, metrics.width)} 100`}
+          preserveAspectRatio="none"
+          aria-label="Clip volume envelope"
+        >
+          <line
+            className="audio-volume-hitbox"
+            x1="0"
+            y1={gainY}
+            x2={metrics.width}
+            y2={gainY}
+            onPointerDown={beginGainDrag}
+          />
+          <line
+            className="audio-volume-line"
+            x1="0"
+            y1={gainY}
+            x2={metrics.width}
+            y2={gainY}
+            vectorEffect="non-scaling-stroke"
+          />
+          <circle
+            className="audio-volume-handle"
+            cx={gainHandleX}
+            cy={gainY}
+            r="4"
+            onPointerDown={beginGainDrag}
+          />
+        </svg>
+
+        <button
+          className={`video-clip-audio-badge ${clip.audioMuted ? "muted" : ""}`}
+          title={clip.audioMuted ? "Unmute linked audio" : "Mute linked audio"}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onUpdateVideoClipAudio?.(clip.id, { audioMuted: !clip.audioMuted });
+          }}
+        >
+          {clip.audioMuted ? "M" : "A"}
+        </button>
+
+        <span className="clip-title audio-title">{clip.name || `Audio ${index + 1}`}</span>
+
+        <div
+          className="clip-handle right"
+          onPointerDown={(event) => beginLinkedClipDrag(event, clip, videoLayer, "trimEnd", metrics)}
+        />
+      </div>
+    );
   }
 
   return (
@@ -753,16 +1082,26 @@ function TimelineBar({
         <div className="timeline-label-column">
           <div className="timeline-label timeline-label-header">Layers</div>
           {videoLayerRows.map((videoLayer) => (
-            <button
-              type="button"
-              className={`timeline-label timeline-label-video ${videoLayer.id === activeVideoLayerId ? "active-video-layer" : ""}`}
-              key={`video-label-${videoLayer.id}`}
-              style={{ height: `${trackHeight}px` }}
-              onClick={() => onSelectVideoLayer?.(videoLayer.id)}
-              disabled={disabled}
-            >
-              {videoLayer.name}
-            </button>
+            <Fragment key={`linked-labels-${videoLayer.id}`}>
+              <button
+                type="button"
+                className={`timeline-label timeline-label-video ${videoLayer.id === activeVideoLayerId ? "active-video-layer" : ""}`}
+                style={{ height: `${trackHeight}px` }}
+                onClick={() => onSelectVideoLayer?.(videoLayer.id)}
+                disabled={disabled}
+              >
+                {videoLayer.name}
+              </button>
+              <button
+                type="button"
+                className={`timeline-label timeline-label-audio ${videoLayer.id === activeVideoLayerId ? "active-video-layer" : ""}`}
+                style={{ height: `${trackHeight}px` }}
+                onClick={() => onSelectVideoLayer?.(videoLayer.id)}
+                disabled={disabled}
+              >
+                Audio linked
+              </button>
+            </Fragment>
           ))}
           {layers.map((layer) => (
             <div
@@ -797,138 +1136,30 @@ function TimelineBar({
             {thumbState === "loading" ? <div className="thumb-status timeline-thumb-floating">Generating preview thumbnails...</div> : null}
             {thumbState === "error" ? <div className="thumb-status timeline-thumb-floating">Could not generate thumbnails for this file.</div> : null}
 
-            {videoLayerRows.map((videoLayer) => (
-              <div
-                className={`timeline-track timeline-track-with-thumbs timeline-video-track ${videoLayer.id === activeVideoLayerId ? "active-video-layer-track" : ""}`}
-                key={`video-track-${videoLayer.id}`}
-                data-layer-id={videoLayer.id}
-                style={{ height: `${trackHeight}px` }}
-              >
-                {(videoLayerClipsById.get(videoLayer.id) || []).map((clip) =>
-                  renderClipThumbnails(clip)
-                )}
-                {(videoLayerClipsById.get(videoLayer.id) || []).map((clip, index) => {
-                  const startSec = (Number(clip.timelineStartMs) || 0) / 1000;
-                  const endSec = (Number(clipTimelineEndMs(clip)) || 0) / 1000;
+            {videoLayerRows.map((videoLayer) => {
+              const linkedClips = videoLayerClipsById.get(videoLayer.id) || [];
 
-                  if (!Number.isFinite(endSec) || endSec <= 0 || startSec >= timelineSpanSec) {
-                    return null;
-                  }
+              return (
+                <Fragment key={`linked-tracks-${videoLayer.id}`}>
+                  <div
+                    className={`timeline-track timeline-track-with-thumbs timeline-video-track ${videoLayer.id === activeVideoLayerId ? "active-video-layer-track" : ""}`}
+                    data-layer-id={videoLayer.id}
+                    style={{ height: `${trackHeight}px` }}
+                  >
+                    {linkedClips.map((clip) => renderClipThumbnails(clip))}
+                    {linkedClips.map((clip, index) => renderVideoClip(clip, index, videoLayer))}
+                  </div>
 
-                  const safeStart = clamp(startSec, 0, timelineSpanSec);
-                  const safeEnd = clamp(endSec, 0, timelineSpanSec);
-                  const left = safeStart * pixelsPerSecond;
-                  const width = Math.max(14, (safeEnd - safeStart) * pixelsPerSecond);
-                  const isSelected = selectedVideoIds.has(clip.id);
-                  const clipWavePeaks = clipWavePeaksFromSource({
-                    sourcePeaks: audioPeaksByUrl[clip.url],
-                    sourceDurationMs: clip.sourceDurationMs,
-                    sourceStartMs: clip.sourceStartMs,
-                    sourceEndMs: clip.sourceEndMs,
-                    targetBars: Math.max(12, Math.min(56, Math.round(width / 6)))
-                  });
-
-                  return (
-                    <div
-                      className={`timeline-clip timeline-video-clip ${isSelected ? "selected" : ""}`}
-                      key={clip.id}
-                      style={{ left: `${left}px`, width: `${width}px` }}
-                      onPointerDown={(event) => {
-                        event.stopPropagation();
-                        onSelectVideoLayer?.(clip.videoLayerId || videoLayer.id);
-                        onSelectVideoClip?.(
-                          clip.id,
-                          { additive: event.shiftKey, toggle: event.shiftKey }
-                        );
-
-                        if (timelineTool === "cut") {
-                          const cutSeconds = clientXToTimelineSeconds(event.clientX);
-                          onSplitVideoClip?.(clip.id, cutSeconds * 1000);
-                          return;
-                        }
-
-                        beginDrag(event, {
-                          kind: "video",
-                          mode: "move",
-                          targetId: clip.id,
-                          windowMs: {
-                            clipStartMs: Number(clip.timelineStartMs) || 0,
-                            clipEndMs: Number(clipTimelineEndMs(clip)) || 0
-                          }
-                        });
-                      }}
-                    >
-                      <div
-                        className="clip-handle left"
-                        onPointerDown={(event) => {
-                          event.stopPropagation();
-                          onSelectVideoLayer?.(clip.videoLayerId || videoLayer.id);
-                          onSelectVideoClip?.(
-                            clip.id,
-                            { additive: event.shiftKey, toggle: event.shiftKey }
-                          );
-                          beginDrag(event, {
-                            kind: "video",
-                            mode: "trimStart",
-                            targetId: clip.id,
-                            windowMs: {
-                              clipStartMs: Number(clip.timelineStartMs) || 0,
-                              clipEndMs: Number(clipTimelineEndMs(clip)) || 0
-                            }
-                          });
-                        }}
-                      />
-
-                      {clipWavePeaks.length > 0 ? (
-                        <div className="video-clip-wave" aria-hidden>
-                          {clipWavePeaks.map((peak, peakIndex) => (
-                            <span
-                              key={`${clip.id}-peak-${peakIndex}`}
-                              style={{ height: `${Math.max(12, Math.round((Number(peak) || 0) * 100))}%` }}
-                            />
-                          ))}
-                        </div>
-                      ) : null}
-
-                      <button
-                        className={`video-clip-audio-badge ${clip.audioMuted ? "muted" : ""}`}
-                        title={clip.audioMuted ? "Unmute clip" : "Mute clip"}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onUpdateVideoClipAudio?.(clip.id, { audioMuted: !clip.audioMuted });
-                        }}
-                      >
-                        {clip.audioMuted ? "M" : "A"}
-                      </button>
-
-                      <span className="clip-title">{clip.name || `Video ${index + 1}`}</span>
-
-                      <div
-                        className="clip-handle right"
-                        onPointerDown={(event) => {
-                          event.stopPropagation();
-                          onSelectVideoLayer?.(clip.videoLayerId || videoLayer.id);
-                          onSelectVideoClip?.(
-                            clip.id,
-                            { additive: event.shiftKey, toggle: event.shiftKey }
-                          );
-                          beginDrag(event, {
-                            kind: "video",
-                            mode: "trimEnd",
-                            targetId: clip.id,
-                            windowMs: {
-                              clipStartMs: Number(clip.timelineStartMs) || 0,
-                              clipEndMs: Number(clipTimelineEndMs(clip)) || 0
-                            }
-                          });
-                        }}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            ))}
+                  <div
+                    className={`timeline-track timeline-audio-track ${videoLayer.id === activeVideoLayerId ? "active-video-layer-track" : ""}`}
+                    data-layer-id={videoLayer.id}
+                    style={{ height: `${trackHeight}px` }}
+                  >
+                    {linkedClips.map((clip, index) => renderAudioClip(clip, index, videoLayer))}
+                  </div>
+                </Fragment>
+              );
+            })}
 
             {layers.map((layer) => (
               <div className="timeline-track timeline-track-with-thumbs" key={`track-${layer.id}`} style={{ height: `${trackHeight}px` }}>
