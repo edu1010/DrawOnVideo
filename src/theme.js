@@ -117,7 +117,8 @@ const theme = createTheme({
       styleOverrides: {
         root: {
           border: "1px solid var(--md-sys-color-outline-variant)",
-          backgroundImage: "none"
+          backgroundImage: "none",
+          boxShadow: "0 1px 0 rgba(0, 0, 0, 0.2)"
         }
       }
     },
@@ -128,7 +129,37 @@ const theme = createTheme({
       styleOverrides: {
         root: {
           borderRadius: 999,
-          paddingInline: 14
+          paddingInline: 14,
+          transition: "transform 120ms ease, box-shadow 120ms ease, background-color 120ms ease, border-color 120ms ease",
+          "&:hover": {
+            transform: "translateY(-1px)"
+          },
+          "&:active": {
+            transform: "translateY(0)"
+          },
+          "&.Mui-disabled": {
+            transform: "none"
+          }
+        },
+        outlined: {
+          borderColor: "color-mix(in srgb, var(--md-sys-color-outline) 70%, transparent)",
+          "&:hover": {
+            borderColor: "var(--md-sys-color-primary)",
+            backgroundColor: "rgba(134, 215, 255, 0.08)"
+          }
+        },
+        containedPrimary: {
+          boxShadow: "0 4px 14px rgba(134, 215, 255, 0.22)",
+          "&:hover": {
+            boxShadow: "0 6px 18px rgba(134, 215, 255, 0.34)"
+          }
+        }
+      }
+    },
+    MuiToggleButton: {
+      styleOverrides: {
+        root: {
+          transition: "background-color 120ms ease, color 120ms ease, border-color 120ms ease"
         }
       }
     },
@@ -142,7 +173,26 @@ const theme = createTheme({
     MuiSlider: {
       styleOverrides: {
         root: {
-          color: "#86d7ff"
+          color: "#86d7ff",
+          height: 6
+        },
+        rail: {
+          opacity: 0.32
+        },
+        track: {
+          border: "none"
+        },
+        thumb: {
+          width: 16,
+          height: 16,
+          boxShadow: "0 1px 4px rgba(0, 0, 0, 0.45)",
+          transition: "box-shadow 120ms ease",
+          "&:hover, &.Mui-focusVisible": {
+            boxShadow: "0 0 0 8px rgba(134, 215, 255, 0.16)"
+          },
+          "&.Mui-active": {
+            boxShadow: "0 0 0 12px rgba(134, 215, 255, 0.22)"
+          }
         }
       }
     },
@@ -153,6 +203,23 @@ const theme = createTheme({
         },
         track: {
           backgroundColor: "#46566e"
+        }
+      }
+    },
+    MuiTooltip: {
+      styleOverrides: {
+        tooltip: {
+          backgroundColor: "rgba(20, 29, 40, 0.96)",
+          border: "1px solid rgba(134, 215, 255, 0.3)",
+          color: "#eaf1ff",
+          fontSize: "0.74rem",
+          fontWeight: 500,
+          borderRadius: 8,
+          padding: "6px 9px",
+          backdropFilter: "blur(6px)"
+        },
+        arrow: {
+          color: "rgba(20, 29, 40, 0.96)"
         }
       }
     }
