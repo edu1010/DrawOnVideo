@@ -21,9 +21,27 @@ import {
 
 const MIN_CLIP_MS = 80;
 const FADE_HANDLE_EDGE_INSET_PX = 16;
+const MIN_PPS = 45;
+const MAX_PPS = 260;
+const MIN_TRACK_HEIGHT = 40;
+const MAX_TRACK_HEIGHT = 120;
+const TIMELINE_PREFS_KEY = "drawonvideo.timeline.prefs";
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function loadTimelinePrefs() {
+  try {
+    const raw = window.localStorage.getItem(TIMELINE_PREFS_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function niceStepSeconds(pixelsPerSecond) {
@@ -270,19 +288,54 @@ function TimelineBar({
   onMoveClip,
   onTrimClip,
   onSplitClip,
+  markers,
+  loopRegion,
+  onSetLoopStart,
+  onSetLoopEnd,
+  onClearLoop,
   viewportHeight,
   disabled
 }) {
-  const [pixelsPerSecond, setPixelsPerSecond] = useState(95);
-  const [trackHeight, setTrackHeight] = useState(56);
-  const [timelineTool, setTimelineTool] = useState("move");
+  const [pixelsPerSecond, setPixelsPerSecond] = useState(() => {
+    const value = Number(loadTimelinePrefs().pixelsPerSecond);
+    return Number.isFinite(value) ? clamp(value, MIN_PPS, MAX_PPS) : 95;
+  });
+  const [trackHeight, setTrackHeight] = useState(() => {
+    const value = Number(loadTimelinePrefs().trackHeight);
+    return Number.isFinite(value) ? clamp(value, MIN_TRACK_HEIGHT, MAX_TRACK_HEIGHT) : 56;
+  });
+  const [timelineTool, setTimelineTool] = useState(() => (
+    loadTimelinePrefs().timelineTool === "cut" ? "cut" : "move"
+  ));
   const [clipThumbnailsById, setClipThumbnailsById] = useState({});
   const [thumbState, setThumbState] = useState("idle");
   const [audioPeaksByUrl, setAudioPeaksByUrl] = useState({});
+  const [scrubPreview, setScrubPreview] = useState(null);
 
   const scrollRef = useRef(null);
   const contentRef = useRef(null);
   const dragRef = useRef(null);
+  const pendingScrollRef = useRef(null);
+  const snapStateRef = useRef({ targetsMs: [] });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        TIMELINE_PREFS_KEY,
+        JSON.stringify({ pixelsPerSecond, trackHeight, timelineTool })
+      );
+    } catch {
+      // Ignore persistence failures (e.g. storage disabled).
+    }
+  }, [pixelsPerSecond, trackHeight, timelineTool]);
+
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (scroller && pendingScrollRef.current != null) {
+      scroller.scrollLeft = pendingScrollRef.current;
+      pendingScrollRef.current = null;
+    }
+  }, [pixelsPerSecond]);
 
   const durationSafe = Number.isFinite(duration) && duration > 0 ? duration : 0;
   const frameMs = fps > 0 ? 1000 / fps : 0;
@@ -331,6 +384,15 @@ function TimelineBar({
   const timelineSpanSec = Math.max(durationSafe, maxVideoEndSec, maxDrawEndSec);
   const contentWidth = Math.max(1200, timelineSpanSec * pixelsPerSecond + 64);
   const rulerStep = niceStepSeconds(pixelsPerSecond);
+  const seekProgressPct = timelineSpanSec > 0
+    ? clamp((currentTime / timelineSpanSec) * 100, 0, 100)
+    : 0;
+  const loopStartMs = Number(loopRegion?.startMs);
+  const loopEndMs = Number(loopRegion?.endMs);
+  const loopActive = Number.isFinite(loopStartMs)
+    && Number.isFinite(loopEndMs)
+    && loopEndMs > loopStartMs;
+  const safeMarkers = Array.isArray(markers) ? markers : [];
 
   const rulerTicks = useMemo(() => {
     if (timelineSpanSec <= 0) {
@@ -351,6 +413,37 @@ function TimelineBar({
     }
     return (videoClips || []).find((clip) => clip.id === selectedId) || null;
   }, [selectedVideoClipIds, videoClips]);
+
+  // Magnetic snap targets (ms): clip edges, the playhead, timeline bounds and
+  // ruler ticks. Held in a ref so the global pointermove handler reads the
+  // latest set without re-binding on every change.
+  useEffect(() => {
+    const targets = new Set();
+    targets.add(0);
+    targets.add(Math.round(timelineSpanSec * 1000));
+    targets.add(Math.round(currentTime * 1000));
+
+    for (const clip of videoClips || []) {
+      targets.add(Math.round(Number(clip.timelineStartMs) || 0));
+      targets.add(Math.round(Number(clipTimelineEndMs(clip)) || 0));
+    }
+
+    for (const layer of layers || []) {
+      for (const stroke of layer.strokes || []) {
+        const window = strokeClipWindowMs(stroke, fps, Number.POSITIVE_INFINITY);
+        targets.add(Math.round(window.clipStartMs));
+        if (Number.isFinite(window.clipEndMs)) {
+          targets.add(Math.round(window.clipEndMs));
+        }
+      }
+    }
+
+    for (let time = 0; time <= timelineSpanSec + 0.0001; time += rulerStep) {
+      targets.add(Math.round(time * 1000));
+    }
+
+    snapStateRef.current = { targetsMs: Array.from(targets) };
+  }, [currentTime, fps, layers, rulerStep, timelineSpanSec, videoClips]);
 
   useEffect(() => {
     let cancelled = false;
@@ -465,6 +558,76 @@ function TimelineBar({
     return clamp(relativeX / pixelsPerSecond, 0, timelineSpanSec);
   }
 
+  function setZoomKeepingPlayhead(nextPps) {
+    const clamped = clamp(Number(nextPps), MIN_PPS, MAX_PPS);
+    const scroller = scrollRef.current;
+    if (scroller && pixelsPerSecond > 0) {
+      const playheadX = currentTime * pixelsPerSecond;
+      const viewportOffset = playheadX - scroller.scrollLeft;
+      pendingScrollRef.current = Math.max(0, currentTime * clamped - viewportOffset);
+    }
+    setPixelsPerSecond(clamped);
+  }
+
+  function fitToWindow() {
+    const scroller = scrollRef.current;
+    if (!scroller || timelineSpanSec <= 0) {
+      return;
+    }
+    const available = Math.max(200, scroller.clientWidth - 24);
+    pendingScrollRef.current = 0;
+    setPixelsPerSecond(clamp(available / timelineSpanSec, MIN_PPS, MAX_PPS));
+  }
+
+  function previewDataUrlAtSeconds(seconds) {
+    const ms = seconds * 1000;
+    let coveringClip = null;
+    for (const clip of videoClips || []) {
+      const start = Number(clip.timelineStartMs) || 0;
+      const end = Number(clipTimelineEndMs(clip)) || start;
+      if (ms >= start && ms <= end) {
+        coveringClip = clip;
+      }
+    }
+    if (!coveringClip) {
+      return null;
+    }
+
+    const items = clipThumbnailsById[coveringClip.id] || [];
+    if (items.length === 0) {
+      return null;
+    }
+
+    const localMs = ms - (Number(coveringClip.timelineStartMs) || 0);
+    let chosen = items[0];
+    for (const item of items) {
+      if ((Number(item.offsetMs) || 0) <= localMs) {
+        chosen = item;
+      } else {
+        break;
+      }
+    }
+    return chosen?.dataUrl || null;
+  }
+
+  function handleScrubHover(event) {
+    if (disabled || timelineSpanSec <= 0) {
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ratio = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+    const seconds = ratio * timelineSpanSec;
+    setScrubPreview({
+      ratio,
+      seconds,
+      dataUrl: previewDataUrlAtSeconds(seconds)
+    });
+  }
+
+  function clearScrubPreview() {
+    setScrubPreview(null);
+  }
+
   function clientPointToVideoLayerId(clientX, clientY) {
     const elementAtPoint = document.elementFromPoint(clientX, clientY);
     const trackElement = elementAtPoint?.closest?.(
@@ -525,9 +688,48 @@ function TimelineBar({
       const moveTarget = drag.kind === "video" ? onMoveVideoClip : onMoveClip;
       const trimTarget = drag.kind === "video" ? onTrimVideoClip : onTrimClip;
 
+      // Magnetic snapping (hold Alt to disable). Snaps to clip edges, the
+      // playhead, ruler ticks and timeline bounds within an 8px threshold.
+      const snapEnabled = !event.altKey;
+      const snapThresholdMs = (8 / drag.pixelsPerSecond) * 1000;
+      const snapValue = (valueMs) => {
+        if (!snapEnabled) {
+          return valueMs;
+        }
+        let best = valueMs;
+        let bestDist = snapThresholdMs;
+        for (const target of snapStateRef.current.targetsMs) {
+          if (
+            Math.abs(target - drag.originalStartMs) < 0.5
+            || Math.abs(target - drag.originalEndMs) < 0.5
+          ) {
+            continue;
+          }
+          const dist = Math.abs(target - valueMs);
+          if (dist < bestDist) {
+            bestDist = dist;
+            best = target;
+          }
+        }
+        return best;
+      };
+
       if (drag.mode === "move") {
         const lengthMs = drag.originalEndMs - drag.originalStartMs;
         let nextStartMs = drag.originalStartMs + deltaMs;
+
+        if (snapEnabled) {
+          const startSnap = snapValue(nextStartMs);
+          const endSnap = snapValue(nextStartMs + lengthMs);
+          const startDist = Math.abs(startSnap - nextStartMs);
+          const endDist = Math.abs(endSnap - (nextStartMs + lengthMs));
+          if (startSnap !== nextStartMs && startDist <= endDist) {
+            nextStartMs = startSnap;
+          } else if (endSnap !== nextStartMs + lengthMs) {
+            nextStartMs = endSnap - lengthMs;
+          }
+        }
+
         let nextEndMs = nextStartMs + lengthMs;
 
         if (nextStartMs < 0) {
@@ -548,7 +750,7 @@ function TimelineBar({
         }
       } else if (drag.mode === "trimStart") {
         const upperBound = drag.originalEndMs - MIN_CLIP_MS;
-        const nextStartMs = clamp(drag.originalStartMs + deltaMs, 0, upperBound);
+        const nextStartMs = clamp(snapValue(drag.originalStartMs + deltaMs), 0, upperBound);
 
         if (drag.kind === "video") {
           trimTarget?.(drag.targetId, {
@@ -563,7 +765,7 @@ function TimelineBar({
         }
       } else if (drag.mode === "trimEnd") {
         const lowerBound = drag.originalStartMs + MIN_CLIP_MS;
-        const nextEndMs = Math.max(lowerBound, drag.originalEndMs + deltaMs);
+        const nextEndMs = Math.max(lowerBound, snapValue(drag.originalEndMs + deltaMs));
 
         if (drag.kind === "video") {
           trimTarget?.(drag.targetId, {
@@ -966,6 +1168,39 @@ function TimelineBar({
           Next frame
         </Button>
 
+        <div className="loop-controls">
+          <Button
+            size="small"
+            variant={loopActive ? "contained" : "outlined"}
+            onClick={onSetLoopStart}
+            disabled={disabled}
+            title="Set loop start at playhead (I)"
+          >
+            A
+          </Button>
+          <Button
+            size="small"
+            variant={loopActive ? "contained" : "outlined"}
+            onClick={onSetLoopEnd}
+            disabled={disabled}
+            title="Set loop end at playhead (O)"
+          >
+            B
+          </Button>
+          {loopActive ? (
+            <Button
+              size="small"
+              variant="text"
+              color="warning"
+              onClick={onClearLoop}
+              disabled={disabled}
+              title="Clear A/B loop"
+            >
+              Loop ✕
+            </Button>
+          ) : null}
+        </div>
+
         <Typography className="time-readout" variant="body2">
           {formatTime(currentTime)} / {formatTime(timelineSpanSec)}
         </Typography>
@@ -980,14 +1215,18 @@ function TimelineBar({
               Zoom
             </Typography>
             <Slider
-              min={45}
-              max={260}
+              min={MIN_PPS}
+              max={MAX_PPS}
               step={1}
               value={pixelsPerSecond}
-              onChange={(_, value) => setPixelsPerSecond(Number(value))}
+              onChange={(_, value) => setZoomKeepingPlayhead(Number(value))}
               disabled={disabled}
             />
           </Stack>
+
+          <Button size="small" variant="outlined" onClick={fitToWindow} disabled={disabled}>
+            Fit
+          </Button>
 
           <Stack minWidth={180}>
             <Typography variant="caption" color="text.secondary">
@@ -1254,21 +1493,70 @@ function TimelineBar({
               </div>
             ))}
 
+            {loopActive ? (
+              <div
+                className="timeline-loop-region"
+                style={{
+                  left: `${(loopStartMs / 1000) * pixelsPerSecond}px`,
+                  width: `${((loopEndMs - loopStartMs) / 1000) * pixelsPerSecond}px`
+                }}
+              />
+            ) : null}
+
+            {safeMarkers.map((markerMs, index) => (
+              <button
+                type="button"
+                className="timeline-marker"
+                key={`marker-${markerMs}-${index}`}
+                style={{ left: `${(markerMs / 1000) * pixelsPerSecond}px` }}
+                title={`Marker ${formatTime(markerMs / 1000)} — click to jump`}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSeek?.(markerMs / 1000);
+                }}
+              />
+            ))}
+
             <div className="timeline-playhead" style={{ left: `${currentTime * pixelsPerSecond}px` }} />
           </div>
         </div>
       </div>
 
-      <input
-        className="timeline-slider"
-        type="range"
-        min={0}
-        max={Math.max(timelineSpanSec, 0.001)}
-        step={1 / Math.max(fps || 30, 1)}
-        value={Math.min(currentTime, timelineSpanSec || 0)}
-        onChange={(event) => onSeek(Number(event.target.value))}
-        disabled={disabled}
-      />
+      <div className="timeline-scrubber" onPointerLeave={clearScrubPreview}>
+        {loopActive && timelineSpanSec > 0 ? (
+          <div
+            className="scrubber-loop"
+            style={{
+              left: `${clamp((loopStartMs / 1000 / timelineSpanSec) * 100, 0, 100)}%`,
+              width: `${clamp(((loopEndMs - loopStartMs) / 1000 / timelineSpanSec) * 100, 0, 100)}%`
+            }}
+          />
+        ) : null}
+        {scrubPreview ? (
+          <div className="scrub-preview" style={{ left: `${scrubPreview.ratio * 100}%` }}>
+            {scrubPreview.dataUrl ? (
+              <img src={scrubPreview.dataUrl} alt="" aria-hidden />
+            ) : (
+              <div className="scrub-preview-noimg">No preview</div>
+            )}
+            <span className="scrub-preview-time">{formatTime(scrubPreview.seconds)}</span>
+          </div>
+        ) : null}
+        <input
+          className="timeline-slider"
+          type="range"
+          aria-label="Scrub video"
+          min={0}
+          max={Math.max(timelineSpanSec, 0.001)}
+          step={1 / Math.max(fps || 30, 1)}
+          value={Math.min(currentTime, timelineSpanSec || 0)}
+          style={{ "--seek-progress": `${seekProgressPct}%` }}
+          onPointerMove={handleScrubHover}
+          onChange={(event) => onSeek(Number(event.target.value))}
+          disabled={disabled}
+        />
+      </div>
     </footer>
   );
 }

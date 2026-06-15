@@ -436,6 +436,54 @@ export function removeVideoClips(clips, clipIds) {
   return (clips || []).filter((clip) => !ids.has(clip.id));
 }
 
+// Ripple delete: remove the selected clips and slide every surviving clip on the
+// same video layer left by the total duration of the deleted clips that started
+// before it, closing the gaps they left behind.
+export function rippleDeleteVideoClips(clips, clipIds) {
+  const ids = new Set(clipIds || []);
+  if (ids.size === 0) {
+    return clips || [];
+  }
+
+  const removedByLayer = new Map();
+  for (const clip of clips || []) {
+    if (!ids.has(clip.id)) {
+      continue;
+    }
+    const layerId = String(clip.videoLayerId || "");
+    if (!removedByLayer.has(layerId)) {
+      removedByLayer.set(layerId, []);
+    }
+    removedByLayer.get(layerId).push(clip);
+  }
+
+  return (clips || [])
+    .filter((clip) => !ids.has(clip.id))
+    .map((clip) => {
+      const removed = removedByLayer.get(String(clip.videoLayerId || ""));
+      if (!removed || removed.length === 0) {
+        return clip;
+      }
+
+      const start = safeNumber(clip.timelineStartMs);
+      let shift = 0;
+      for (const removedClip of removed) {
+        if (safeNumber(removedClip.timelineStartMs) < start) {
+          shift += clipTimelineDurationMs(removedClip);
+        }
+      }
+
+      if (shift <= 0) {
+        return clip;
+      }
+
+      return {
+        ...clip,
+        timelineStartMs: Math.max(0, start - shift)
+      };
+    });
+}
+
 export function moveVideoClipsToLayer(clips, clipIds, targetLayerId) {
   const ids = new Set(clipIds || []);
   const layerId = String(targetLayerId || "");

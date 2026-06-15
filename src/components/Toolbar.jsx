@@ -12,6 +12,8 @@ function Toolbar({
   brush,
   currentPressure,
   currentPressureInput,
+  penDetected,
+  tabletCapabilities,
   onionSkin,
   onBrushChange,
   onSetOnionSkin,
@@ -29,6 +31,8 @@ function Toolbar({
     : "--";
   const pointerLabel = currentPressureInput?.pointerType || "unknown";
   const hasHardwarePressure = Boolean(currentPressureInput?.hasHardwarePressure);
+  const isStylusNow = Boolean(currentPressureInput?.isStylus);
+  const hasTilt = Boolean(currentPressureInput?.hasTilt);
   const isMousePressureFallback = pointerLabel === "mouse"
     && Number.isFinite(rawPressure)
     && Math.abs(rawPressure - 0.5) < 0.0001
@@ -36,6 +40,36 @@ function Toolbar({
   const sourceLabel = currentPressureInput?.hasHardwarePressure
     ? currentPressureInput.source
     : "no real pressure";
+
+  // Proactive device detection so the user knows their tablet is recognized
+  // before they even draw a stroke.
+  const finePointer = Boolean(tabletCapabilities?.finePointer);
+  let deviceStatus;
+  if (isStylusNow || penDetected) {
+    deviceStatus = {
+      tone: "ok",
+      label: hasTilt ? "Stylus detected (tilt-capable)" : "Stylus detected",
+      detail: "Pen pressure is active. Wacom / Huion ready."
+    };
+  } else if (isMousePressureFallback) {
+    deviceStatus = {
+      tone: "warn",
+      label: "Tablet in mouse mode",
+      detail: "Pressure is emulated. Enable \"Windows Ink\" and turn off \"Mouse mode\" in your Wacom / Huion driver."
+    };
+  } else if (finePointer) {
+    deviceStatus = {
+      tone: "idle",
+      label: "Fine pointer detected",
+      detail: "Touch the canvas with your pen to confirm pressure."
+    };
+  } else {
+    deviceStatus = {
+      tone: "idle",
+      label: "No stylus detected yet",
+      detail: "Connect your tablet and draw once. If it stays \"mouse\", enable Windows Ink in the driver."
+    };
+  }
 
   return (
     <aside className="toolbar-panel">
@@ -112,6 +146,18 @@ function Toolbar({
         />
       </div>
 
+      <div className={`control-group tablet-status tablet-status-${deviceStatus.tone}`}>
+        <div className="tablet-status-head">
+          <span className="tablet-status-dot" aria-hidden />
+          <strong>{deviceStatus.label}</strong>
+        </div>
+        <span className="tablet-status-detail">{deviceStatus.detail}</span>
+        <span className="tablet-status-meta">
+          Pointer: {pointerLabel} | Pressure: {hasHardwarePressure ? "hardware" : "none"}
+          {hasTilt ? " | tilt" : ""}
+        </span>
+      </div>
+
       <div className="control-group checkbox-group">
         <FormControlLabel
           control={
@@ -136,7 +182,8 @@ function Toolbar({
               </span>
               {isMousePressureFallback ? (
                 <span className="pressure-warning">
-                  Mouse pressure emulation detected. Enable Windows Ink in your tablet driver profile.
+                  Mouse pressure emulation detected. In the Wacom / Huion driver, enable
+                  "Windows Ink" and disable "Mouse mode" so real pen pressure is sent.
                 </span>
               ) : null}
             </div>

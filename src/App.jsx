@@ -36,6 +36,7 @@ import {
   moveVideoClipsToLayer,
   normalizeVideoClips,
   removeVideoClips,
+  rippleDeleteVideoClips,
   resolveSameLayerBlend,
   sortVideoClips,
   splitVideoClip,
@@ -208,28 +209,67 @@ function fileNameFromPath(filePath) {
   return parts[parts.length - 1] || filePath;
 }
 
+// Some pen drivers report raw pressure *levels* (e.g. 0..8191 on Wacom/Huion)
+// instead of the normalized 0..1 PointerEvent range. Scale those back down
+// based on the common level ceilings (1024 / 2048 / 4096 / 8192).
+function normalizeRawPressureLevel(value) {
+  if (value <= 1) {
+    return value;
+  }
+  if (value <= 1024) {
+    return value / 1023;
+  }
+  if (value <= 2048) {
+    return value / 2047;
+  }
+  if (value <= 4096) {
+    return value / 4095;
+  }
+  return value / 8191;
+}
+
 function readPointerPressureInfo(pointerEvent) {
   const samples = typeof pointerEvent.getCoalescedEvents === "function"
     ? pointerEvent.getCoalescedEvents()
     : [];
-  const candidates = [...samples, pointerEvent];
+  const candidates = samples.length > 0 ? [...samples, pointerEvent] : [pointerEvent];
   const pointerType = pointerEvent.pointerType || "unknown";
   const rawPressure = Number(pointerEvent.pressure);
+
+  // Tilt and twist are only ever produced by a real stylus. Their presence is a
+  // strong signal that a Wacom/Huion pen is in use even when the driver reports
+  // the pointer as "mouse" (i.e. mouse mode / Windows Ink disabled).
+  const tiltX = Number(pointerEvent.tiltX) || 0;
+  const tiltY = Number(pointerEvent.tiltY) || 0;
+  const twist = Number(pointerEvent.twist) || 0;
+  const hasTilt = Math.abs(tiltX) > 0.0001 || Math.abs(tiltY) > 0.0001 || Math.abs(twist) > 0.0001;
+  const isStylus = pointerType === "pen" || hasTilt;
+
   let hardwarePressure = null;
   let source = "none";
 
-  for (let index = candidates.length - 1; index >= 0; index -= 1) {
-    const candidate = candidates[index];
+  // Take the strongest genuine pressure across all coalesced samples instead of
+  // the latest one. A single high-frequency sample momentarily reading 0 is
+  // common on Huion/Wacom at speed, and using the peak avoids those dropouts.
+  for (const candidate of candidates) {
     const directPressure = Number(candidate.pressure);
-    if (Number.isFinite(directPressure) && directPressure > 0) {
-      const normalizedPressure = directPressure > 1 ? directPressure / 8191 : directPressure;
-      // Mouse pointers usually report 0.5 while pressed, which is not real pressure data.
-      if (pointerType === "mouse" && Math.abs(normalizedPressure - 0.5) < 0.0001) {
-        continue;
-      }
-      hardwarePressure = clamp(normalizedPressure, 0.05, 1);
+    if (!Number.isFinite(directPressure) || directPressure <= 0) {
+      continue;
+    }
+
+    const normalizedPressure = normalizeRawPressureLevel(directPressure);
+
+    // A non-stylus pointer pinned at exactly 0.5 is emulated, not real pressure.
+    // Only discard it when there is no stylus signal (tilt), so tablets that run
+    // in mouse mode but still emit varying pressure keep working.
+    if (!isStylus && pointerType === "mouse" && Math.abs(normalizedPressure - 0.5) < 0.0001) {
+      continue;
+    }
+
+    const candidatePressure = clamp(normalizedPressure, 0.05, 1);
+    if (hardwarePressure === null || candidatePressure > hardwarePressure) {
+      hardwarePressure = candidatePressure;
       source = candidate === pointerEvent ? "event.pressure" : "coalesced.pressure";
-      break;
     }
   }
 
@@ -241,12 +281,39 @@ function readPointerPressureInfo(pointerEvent) {
 
   return {
     pointerType,
+    isStylus,
+    hasTilt,
+    tiltX,
+    tiltY,
+    twist,
     rawPressure: Number.isFinite(rawPressure) ? rawPressure : null,
     hardwarePressure,
     source,
     sampleCount: candidates.length,
-    hasHardwarePressure: hardwarePressure !== null
+    // A stylus stays pressure-capable even while momentarily lifted (pressure 0),
+    // so don't fall back to the mouse-emulation warning for pens.
+    hasHardwarePressure: hardwarePressure !== null || isStylus
   };
+}
+
+function detectTabletCapabilities() {
+  const capabilities = {
+    finePointer: false,
+    coarsePointer: false,
+    maxTouchPoints: 0
+  };
+
+  try {
+    if (typeof window.matchMedia === "function") {
+      capabilities.finePointer = window.matchMedia("(any-pointer: fine)").matches;
+      capabilities.coarsePointer = window.matchMedia("(any-pointer: coarse)").matches;
+    }
+    capabilities.maxTouchPoints = Number(navigator.maxTouchPoints) || 0;
+  } catch {
+    // Ignore environments without matchMedia / navigator.
+  }
+
+  return capabilities;
 }
 
 function normalizePressure(pointerEvent, pressureEnabled, options = {}) {
@@ -280,6 +347,11 @@ function normalizePressure(pointerEvent, pressureEnabled, options = {}) {
 
 const IDLE_PRESSURE_INPUT = {
   pointerType: "idle",
+  isStylus: false,
+  hasTilt: false,
+  tiltX: 0,
+  tiltY: 0,
+  twist: 0,
   rawPressure: null,
   hardwarePressure: null,
   source: "none",
@@ -509,10 +581,15 @@ function App() {
   const [layers, setLayers] = useState([initialLayer]);
   const [activeLayerId, setActiveLayerId] = useState(initialLayer.id);
   const [currentTime, setCurrentTime] = useState(0);
+  const [markers, setMarkers] = useState([]);
+  const [loopRegion, setLoopRegion] = useState(null);
+  const loopRegionRef = useRef(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isGapPreview, setIsGapPreview] = useState(false);
   const [currentPressure, setCurrentPressure] = useState(0);
   const [currentPressureInput, setCurrentPressureInput] = useState(IDLE_PRESSURE_INPUT);
+  const [penDetected, setPenDetected] = useState(false);
+  const [tabletCapabilities] = useState(() => detectTabletCapabilities());
   const [brush, setBrush] = useState(DEFAULT_BRUSH);
   const [onionSkin, setOnionSkin] = useState(false);
   const [status, setStatus] = useState("Ready. Open a video clip to start annotating.");
@@ -582,6 +659,7 @@ function App() {
   const justResumedRef = useRef(false);
   const currentPressureUiRef = useRef(0);
   const pressureUiUpdatedAtRef = useRef(0);
+  const penSeenRef = useRef(false);
 
   const setPlayheadMs = useCallback((nextMs) => {
     const safeMs = Math.max(0, Number(nextMs) || 0);
@@ -610,6 +688,10 @@ function App() {
       setCurrentPressure(safe);
       if (input) {
         setCurrentPressureInput(input);
+        if (input.isStylus && !penSeenRef.current) {
+          penSeenRef.current = true;
+          setPenDetected(true);
+        }
       }
     }
   }, []);
@@ -2201,6 +2283,87 @@ function App() {
     [currentTime, seekGlobalTimeMs]
   );
 
+  const handleToggleMarker = useCallback(() => {
+    const tMs = Math.max(0, (currentTimeRef.current || 0) * 1000);
+    const safeFps = Math.max(Number(videoMetaRef.current.fps) || 30, 1);
+    const toleranceMs = (1000 / safeFps) * 1.5;
+    setMarkers((prev) => {
+      const existingIndex = prev.findIndex((marker) => Math.abs(marker - tMs) <= toleranceMs);
+      if (existingIndex >= 0) {
+        return prev.filter((_, index) => index !== existingIndex);
+      }
+      return [...prev, tMs].sort((a, b) => a - b);
+    });
+  }, []);
+
+  const handleJumpMarker = useCallback((direction) => {
+    const sorted = markers;
+    if (sorted.length === 0) {
+      return;
+    }
+    const tMs = Math.max(0, (currentTimeRef.current || 0) * 1000);
+    const epsilon = 5;
+    let targetMs = null;
+    if (direction < 0) {
+      for (let index = sorted.length - 1; index >= 0; index -= 1) {
+        if (sorted[index] < tMs - epsilon) {
+          targetMs = sorted[index];
+          break;
+        }
+      }
+    } else {
+      for (let index = 0; index < sorted.length; index += 1) {
+        if (sorted[index] > tMs + epsilon) {
+          targetMs = sorted[index];
+          break;
+        }
+      }
+    }
+    if (targetMs != null) {
+      handleSeek(targetMs / 1000);
+    }
+  }, [handleSeek, markers]);
+
+  const handleSetLoopStart = useCallback(() => {
+    const tMs = Math.max(0, (currentTimeRef.current || 0) * 1000);
+    setLoopRegion((prev) => {
+      const endMs = prev && Number.isFinite(prev.endMs) && prev.endMs > tMs ? prev.endMs : null;
+      return { startMs: tMs, endMs };
+    });
+  }, []);
+
+  const handleSetLoopEnd = useCallback(() => {
+    const tMs = Math.max(0, (currentTimeRef.current || 0) * 1000);
+    setLoopRegion((prev) => {
+      const startMs = prev && Number.isFinite(prev.startMs) && prev.startMs < tMs ? prev.startMs : null;
+      return { startMs, endMs: tMs };
+    });
+  }, []);
+
+  const handleClearLoop = useCallback(() => setLoopRegion(null), []);
+
+  useEffect(() => {
+    loopRegionRef.current = loopRegion;
+  }, [loopRegion]);
+
+  useEffect(() => {
+    if (!isPlaying) {
+      return;
+    }
+    const region = loopRegionRef.current;
+    if (
+      !region
+      || !Number.isFinite(region.startMs)
+      || !Number.isFinite(region.endMs)
+      || region.endMs <= region.startMs
+    ) {
+      return;
+    }
+    if (currentTime * 1000 >= region.endMs - 1) {
+      seekGlobalTimeMs(region.startMs, { autoplay: true });
+    }
+  }, [currentTime, isPlaying, seekGlobalTimeMs]);
+
   const activeLayer = layers.find((layer) => layer.id === activeLayerId);
   const activeVideoLayer = videoLayers.find((layer) => layer.id === activeVideoLayerId);
 
@@ -2669,6 +2832,10 @@ function App() {
 
       event.preventDefault();
 
+      // Shift+Delete performs a ripple delete: later video clips on the same
+      // layer slide left to close the gap left by the removed clips.
+      const ripple = event.shiftKey;
+
       const grouped = new Map();
       for (const selection of selectedClips) {
         if (!grouped.has(selection.layerId)) {
@@ -2685,7 +2852,9 @@ function App() {
         return next;
       });
       if (selectedVideoClipIds.length > 0) {
-        setVideoClips((prev) => removeVideoClips(prev, selectedVideoClipIds));
+        setVideoClips((prev) => (ripple
+          ? rippleDeleteVideoClips(prev, selectedVideoClipIds)
+          : removeVideoClips(prev, selectedVideoClipIds)));
       }
       setSelectedClips([]);
       setSelectedVideoClipIds([]);
@@ -2694,6 +2863,87 @@ function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [selectedClips, selectedVideoClipIds]);
+
+  useEffect(() => {
+    const onTransportKey = (event) => {
+      if (event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
+
+      const target = event.target;
+      const isEditable = target instanceof HTMLElement
+        && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+      if (isEditable) {
+        return;
+      }
+
+      switch (event.key) {
+        case " ":
+        case "Spacebar":
+        case "k":
+        case "K":
+          event.preventDefault();
+          handleTogglePlay();
+          break;
+        case "ArrowLeft":
+        case "j":
+        case "J":
+          event.preventDefault();
+          handleStepFrame(-1);
+          break;
+        case "ArrowRight":
+        case "l":
+        case "L":
+          event.preventDefault();
+          handleStepFrame(1);
+          break;
+        case "Home":
+          event.preventDefault();
+          handleSeek(0);
+          break;
+        case "End":
+          event.preventDefault();
+          handleSeek(Number.MAX_SAFE_INTEGER);
+          break;
+        case "m":
+        case "M":
+          event.preventDefault();
+          handleToggleMarker();
+          break;
+        case ",":
+          event.preventDefault();
+          handleJumpMarker(-1);
+          break;
+        case ".":
+          event.preventDefault();
+          handleJumpMarker(1);
+          break;
+        case "i":
+        case "I":
+          event.preventDefault();
+          handleSetLoopStart();
+          break;
+        case "o":
+        case "O":
+          event.preventDefault();
+          handleSetLoopEnd();
+          break;
+        default:
+          break;
+      }
+    };
+
+    window.addEventListener("keydown", onTransportKey);
+    return () => window.removeEventListener("keydown", onTransportKey);
+  }, [
+    handleTogglePlay,
+    handleStepFrame,
+    handleSeek,
+    handleToggleMarker,
+    handleJumpMarker,
+    handleSetLoopStart,
+    handleSetLoopEnd
+  ]);
 
   useEffect(() => {
     const onPointerMove = (event) => {
@@ -3048,6 +3298,8 @@ function App() {
         brush={brush}
         currentPressure={currentPressure}
         currentPressureInput={currentPressureInput}
+        penDetected={penDetected}
+        tabletCapabilities={tabletCapabilities}
         onionSkin={onionSkin}
         onBrushChange={handleBrushChange}
         onSetOnionSkin={setOnionSkin}
@@ -3101,6 +3353,11 @@ function App() {
         onMoveClip={handleMoveClip}
         onTrimClip={handleTrimClip}
         onSplitClip={handleSplitClip}
+        markers={markers}
+        loopRegion={loopRegion}
+        onSetLoopStart={handleSetLoopStart}
+        onSetLoopEnd={handleSetLoopEnd}
+        onClearLoop={handleClearLoop}
         viewportHeight={timelineViewportHeight}
         disabled={!hasVideo || exportState.running}
       />
